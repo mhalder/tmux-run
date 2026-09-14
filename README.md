@@ -10,8 +10,7 @@
 ## Install
 
 ```sh
-cargo build --release
-# the binary is at target/release/tmux-run
+cargo install --path .
 ```
 
 ## Usage
@@ -39,3 +38,11 @@ tmux-run build -- cargo test
 The marker is appended to the log when the command exits, with the command's exit status. Command stdout and stderr are combined into the log.
 
 The task name is normalized for tmux and combined with the process id and timestamp to make the session name unique. The log and a temporary bash script live under the system temp directory in `tmux-run-<session>`; command arguments are written into the script with argument boundaries preserved, rather than interpolated directly into the tmux command line.
+
+## Agent skill
+
+[`docs/SKILL.md`](docs/SKILL.md) is a [pi](https://pi.dev) skill that teaches a coding agent to run long commands with tmux-run: starting a task, reading its log and completion marker, and closing the session afterwards. Load it by path, for example:
+
+```sh
+pi --skill docs/SKILL.md
+```
