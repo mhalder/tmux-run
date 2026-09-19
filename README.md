@@ -17,6 +17,7 @@ cargo install --path .
 
 ```sh
 tmux-run <task-name> -- <command> [args...]
+tmux-run wait <session-name> [--timeout <seconds>]
 tmux-run --help
 ```
 
@@ -24,7 +25,17 @@ Example:
 
 ```sh
 tmux-run build -- cargo test
+tmux-run wait build_1234-5678 --timeout 600
 ```
+
+## Wait for completion
+
+`tmux-run wait` blocks until the log records the completion marker, then exits with the recorded status:
+
+- the command's exit status
+- `124` if `--timeout` elapsed
+- `3` if the session ended or never existed without a marker
+- `2` on a usage error
 
 ## Output
 
@@ -32,16 +43,17 @@ tmux-run build -- cargo test
 
 - the tmux session name
 - the log path
+- a `tmux-run wait` command for the session
 - the completion marker format, `__DONE__:<status>`
 - example attach and log-follow commands
 
 The marker is appended to the log when the command exits, with the command's exit status. Command stdout and stderr are combined into the log.
 
-The task name is normalized for tmux and combined with the process id and timestamp to make the session name unique. The log and a temporary bash script live under the system temp directory in `tmux-run-<session>`; command arguments are written into the script with argument boundaries preserved, rather than interpolated directly into the tmux command line.
+The task name is normalized for tmux and combined with the process id and timestamp to make the session name unique. The log and the generated bash script live in `tmux-run/<session>` under `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory; command arguments are written into the script with argument boundaries preserved, rather than interpolated directly into the tmux command line. State is never deleted automatically.
 
 ## Agent skill
 
-[`docs/SKILL.md`](docs/SKILL.md) is a [pi](https://pi.dev) skill that teaches a coding agent to run long commands with tmux-run: starting a task, reading its log and completion marker, and closing the session afterwards. Load it by path, for example:
+[`docs/SKILL.md`](docs/SKILL.md) is a [pi](https://pi.dev) skill that teaches a coding agent to run long commands with tmux-run: starting a task, waiting for it, reading its log and completion marker, and closing the session afterwards. Load it by path, for example:
 
 ```sh
 pi --skill docs/SKILL.md
