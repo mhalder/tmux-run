@@ -1,9 +1,8 @@
 use std::env;
-use std::ffi::OsString;
-use std::fmt::Write as _;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::thread;
@@ -14,13 +13,67 @@ const DONE_MARKER_PREFIX: &str = "__DONE__:";
 const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SESSION_CHECK_EVERY: u32 = 4;
-const HELP: &str = "Usage: tmux-run <task-name> -- <command> [args...]\n       tmux-run wait <session-name> [--timeout <seconds>]\n\nStarts <command> in a detached tmux session and writes stdout/stderr to a log file.\n`tmux-run wait` blocks until that log records __DONE__:<status> and exits with that status.\n\nArguments:\n  <task-name>        Name used to build the tmux session name\n  --                 Separates tmux-run arguments from the command\n  <command> [args...] Command and arguments to run under bash\n\nWait arguments:\n  <session-name>     Session name printed by tmux-run\n  --timeout <secs>   Give up after this long and exit 124\n\nOutput:\n  session            tmux session name\n  log                path to combined stdout/stderr log\n  completion marker  __DONE__:<status> appended when the command exits\n\nWait exit status:\n  <status>           status recorded in the completion marker\n  124                --timeout elapsed\n  3                  session ended or never existed without a marker\n  2                  usage error\n\nExamples:\n  tmux-run build -- cargo test\n  tmux-run wait build_1234-5678 --timeout 600\n  tmux-run deploy -- bash -lc 'echo start; ./deploy.sh'\n";
+
+const SKILL: &str = include_str!("../docs/SKILL.md");
+const COMPLETION_BASH: &str = include_str!("../completions/tmux-run.bash");
+const COMPLETION_ZSH: &str = include_str!("../completions/_tmux-run");
+const COMPLETION_FISH: &str = include_str!("../completions/tmux-run.fish");
+
+const HELP: &str = "Usage: tmux-run <task-name> -- <command> [args...]
+       tmux-run wait <session-name> [--timeout <seconds>]
+       tmux-run skill [--install [DIR]] [--check [DIR]]
+       tmux-run completion <bash|zsh|fish> [--install] [--check]
+       tmux-run --help | -h
+       tmux-run --version | -V
+
+Starts <command> in a detached tmux session and writes stdout/stderr to a log
+file. `tmux-run wait` blocks until that log records __DONE__:<status> and exits
+with that status.
+
+Run arguments:
+  <task-name>          Name used to build the tmux session name
+  --                   Separates tmux-run arguments from the command
+  <command> [args...]  Command and arguments to run under bash
+
+Wait arguments:
+  <session-name>       Session name printed by tmux-run
+  --timeout <secs>     Give up after this long and exit 124
+
+Skill subcommand:
+  tmux-run skill                    Print the embedded agent skill to stdout
+  tmux-run skill --install [DIR]    Write DIR/SKILL.md (default ~/.agents/skills/tmux-run)
+  tmux-run skill --check [DIR]      Exit 1 if DIR/SKILL.md is missing or differs
+
+Completion subcommand:
+  tmux-run completion <shell>              Print the completion script for <shell>
+  tmux-run completion <shell> --install    Install the completion script
+  tmux-run completion <shell> --check      Exit 1 if the installed script is missing or differs
+  zsh users: add the site-functions directory to $fpath
+
+Exit status:
+  <status>    status recorded in the completion marker (wait only)
+  124         --timeout elapsed
+  3           session ended or never existed without a marker
+  2           usage error
+  1           --check found the installed file missing or stale
+
+Examples:
+  tmux-run build -- cargo test
+  tmux-run wait build_1234-5678 --timeout 600
+  tmux-run deploy -- bash -lc 'echo start; ./deploy.sh'
+  tmux-run skill --install
+  tmux-run completion bash --install
+";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CliAction {
     Help,
+    Version,
     Run(Cli),
     Wait(WaitCli),
+    Skill(SkillCli),
+    Completion(CompletionCli),
+    CompleteSessions(Option<OsString>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,6 +86,49 @@ struct Cli {
 struct WaitCli {
     session_name: String,
     timeout: Option<Duration>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SkillCli {
+    mode: SkillMode,
+    dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkillMode {
+    Print,
+    Install,
+    Check,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CompletionCli {
+    shell: Shell,
+    mode: CompletionMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl Shell {
+    fn word(self) -> &'static str {
+        match self {
+            Shell::Bash => "bash",
+            Shell::Zsh => "zsh",
+            Shell::Fish => "fish",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionMode {
+    Print,
+    Install,
+    Check,
 }
 
 #[derive(Debug)]
@@ -60,11 +156,23 @@ fn run() -> Result<i32, String> {
             print!("{HELP}");
             Ok(0)
         }
+        CliAction::Version => {
+            println!("tmux-run {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
         CliAction::Run(cli) => {
             start_task(&cli)?;
             Ok(0)
         }
         CliAction::Wait(wait) => run_wait(&wait),
+        CliAction::Skill(skill) => run_skill(&skill),
+        CliAction::Completion(completion) => run_completion(&completion),
+        CliAction::CompleteSessions(prefix) => {
+            for name in list_sessions(prefix.as_deref()) {
+                println!("{name}");
+            }
+            Ok(0)
+        }
     }
 }
 
@@ -99,14 +207,16 @@ fn start_task(cli: &Cli) -> Result<(), String> {
         .map_err(|err| format!("failed to prepare paths: {err}"))?;
     let script = render_script(&cli.command);
 
-    fs::write(&paths.script_path, script)
+    fs::write(&paths.script_path, &script)
         .map_err(|err| format!("failed to write {}: {err}", paths.script_path.display()))?;
 
-    let runner = format!(
-        "bash {} >{} 2>&1",
-        shell_quote_path(&paths.script_path),
-        shell_quote_path(&paths.log_path)
-    );
+    let mut runner = Vec::new();
+    runner.extend_from_slice(b"bash ");
+    runner.extend_from_slice(&quote_bytes(paths.script_path.as_os_str().as_bytes()));
+    runner.extend_from_slice(b" >");
+    runner.extend_from_slice(&quote_bytes(paths.log_path.as_os_str().as_bytes()));
+    runner.extend_from_slice(b" 2>&1");
+    let runner = OsString::from_vec(runner);
 
     let output = Command::new("tmux")
         .args(["new-session", "-d", "-s"])
@@ -147,29 +257,44 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
     let mut args = args.into_iter();
     let first = args
         .next()
-        .ok_or_else(|| "missing task name".to_string())?
+        .ok_or_else(|| "missing command".to_string())?
         .into_string()
-        .map_err(|_| "task name must be valid UTF-8".to_string())?;
+        .map_err(|_| "arguments must be valid UTF-8".to_string())?;
 
     if first == "--help" || first == "-h" {
         return Ok(CliAction::Help);
     }
-
+    if first == "--version" || first == "-V" {
+        return Ok(CliAction::Version);
+    }
     if first == "wait" {
-        // `wait -- <command>` still names a task literally called "wait".
-        return match args.next() {
-            Some(separator) if separator == "--" => parse_command(first, args),
-            Some(session) => {
-                let session_name = session
-                    .into_string()
-                    .map_err(|_| "session name must be valid UTF-8".to_string())?;
-                parse_wait(session_name, args)
-            }
-            None => Err("missing session name after `wait`".to_string()),
-        };
+        return parse_wait_subcommand(args);
+    }
+    if first == "skill" {
+        return parse_skill(args);
+    }
+    if first == "completion" {
+        return parse_completion(args);
+    }
+    if first == "__complete" {
+        return parse_complete(args);
     }
 
     parse_run(first, args)
+}
+
+fn parse_wait_subcommand(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `wait -- <command>` still names a task literally called "wait".
+    match args.next() {
+        Some(separator) if separator == "--" => parse_command("wait".to_string(), args),
+        Some(session) => {
+            let session_name = session
+                .into_string()
+                .map_err(|_| "session name must be valid UTF-8".to_string())?;
+            parse_wait(session_name, args)
+        }
+        None => Err("missing session name after `wait`".to_string()),
+    }
 }
 
 fn parse_run(
@@ -240,6 +365,99 @@ fn parse_wait(
         session_name,
         timeout,
     }))
+}
+
+fn parse_skill(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    let mut mode: Option<SkillMode> = None;
+    let mut dir: Option<PathBuf> = None;
+
+    while let Some(arg) = args.next() {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+
+        let wanted = match arg.as_str() {
+            "--install" => SkillMode::Install,
+            "--check" => SkillMode::Check,
+            other => return Err(format!("unexpected argument for skill: {other}")),
+        };
+
+        if mode.is_some() {
+            return Err("--install and --check are mutually exclusive".to_string());
+        }
+        mode = Some(wanted);
+
+        // An optional directory may follow; a leading `-` means no directory.
+        if let Some(next) = args.next() {
+            let next = next
+                .into_string()
+                .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+            if next.starts_with('-') {
+                return Err(format!("unexpected argument for skill: {next}"));
+            }
+            dir = Some(PathBuf::from(next));
+        }
+    }
+
+    Ok(CliAction::Skill(SkillCli {
+        mode: mode.unwrap_or(SkillMode::Print),
+        dir,
+    }))
+}
+
+fn parse_completion(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    let shell_arg = args
+        .next()
+        .ok_or_else(|| "completion requires a shell: bash, zsh, or fish".to_string())?
+        .into_string()
+        .map_err(|_| "shell must be valid UTF-8".to_string())?;
+
+    let shell = match shell_arg.as_str() {
+        "bash" => Shell::Bash,
+        "zsh" => Shell::Zsh,
+        "fish" => Shell::Fish,
+        other => return Err(format!("unknown shell: {other}")),
+    };
+
+    let mut mode: Option<CompletionMode> = None;
+    for arg in args {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+        let wanted = match arg.as_str() {
+            "--install" => CompletionMode::Install,
+            "--check" => CompletionMode::Check,
+            other => return Err(format!("unexpected argument for completion: {other}")),
+        };
+        if mode.is_some() {
+            return Err("--install and --check are mutually exclusive".to_string());
+        }
+        mode = Some(wanted);
+    }
+
+    Ok(CliAction::Completion(CompletionCli {
+        shell,
+        mode: mode.unwrap_or(CompletionMode::Print),
+    }))
+}
+
+fn parse_complete(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    let what = args
+        .next()
+        .ok_or_else(|| "__complete requires a subcommand".to_string())?
+        .into_string()
+        .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+
+    if what != "sessions" {
+        return Err(format!("unknown __complete subcommand: {what}"));
+    }
+
+    let prefix = args.next();
+    if args.next().is_some() {
+        return Err("too many arguments for __complete sessions".to_string());
+    }
+
+    Ok(CliAction::CompleteSessions(prefix))
 }
 
 /// A session name is `normalize_task_name` output plus a pid and timestamp, so
@@ -452,47 +670,244 @@ fn normalize_task_name(task_name: &str) -> String {
     }
 }
 
-fn render_script(command: &[OsString]) -> String {
-    let mut script = String::from("#!/usr/bin/env bash\nset -uo pipefail\ncmd=(");
+fn render_script(command: &[OsString]) -> Vec<u8> {
+    let mut script = Vec::new();
+    script.extend_from_slice(b"#!/usr/bin/env bash\nset -uo pipefail\ncmd=(");
     for arg in command {
-        script.push(' ');
-        script.push_str(&shell_quote_bytes(arg.as_os_str().as_bytes()));
+        script.push(b' ');
+        script.extend_from_slice(&quote_bytes(arg.as_os_str().as_bytes()));
     }
-    script.push_str(
-        " )\n\"${cmd[@]}\"\nstatus=$?\nprintf '__DONE__:%s\\n' \"$status\"\nexit \"$status\"\n",
+    script.extend_from_slice(
+        b" )\n\"${cmd[@]}\"\nstatus=$?\nprintf '__DONE__:%s\\n' \"$status\"\nexit \"$status\"\n",
     );
     script
 }
 
+/// POSIX single-quote a byte string, preserving every byte exactly. `'` inside
+/// becomes `'\''` and the whole value is wrapped in single quotes.
+fn quote_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut quoted = Vec::with_capacity(bytes.len() + 2);
+    quoted.push(b'\'');
+    for &byte in bytes {
+        if byte == b'\'' {
+            quoted.extend_from_slice(b"'\\''");
+        } else {
+            quoted.push(byte);
+        }
+    }
+    quoted.push(b'\'');
+    quoted
+}
+
+/// Human-readable, single-quoted form of a string. For display only; never
+/// feed this back to a shell.
 fn shell_quote(value: &str) -> String {
-    shell_quote_bytes(value.as_bytes())
+    String::from_utf8_lossy(&quote_bytes(value.as_bytes())).into_owned()
 }
 
 fn shell_quote_path(path: &Path) -> String {
-    shell_quote_bytes(path.as_os_str().as_bytes())
+    String::from_utf8_lossy(&quote_bytes(path.as_os_str().as_bytes())).into_owned()
 }
 
-fn shell_quote_bytes(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return "''".to_string();
-    }
-
-    let mut quoted = String::from("'");
-    for &byte in bytes {
-        if byte == b'\'' {
-            quoted.push_str("'\\''");
-        } else {
-            let _ = quoted.write_char(byte as char);
+fn run_skill(cli: &SkillCli) -> Result<i32, String> {
+    match cli.mode {
+        SkillMode::Print => {
+            print!("{SKILL}");
+            Ok(0)
+        }
+        SkillMode::Install => {
+            let dir = resolve_skill_dir(cli.dir.as_deref())?;
+            let path = dir.join("SKILL.md");
+            install_bytes(&path, SKILL.as_bytes())
+        }
+        SkillMode::Check => {
+            let dir = resolve_skill_dir(cli.dir.as_deref())?;
+            let path = dir.join("SKILL.md");
+            let hint = format!("tmux-run skill --install {}", dir.display());
+            check_file(&path, SKILL.as_bytes(), &hint)
         }
     }
-    quoted.push('\'');
-    quoted
+}
+
+fn resolve_skill_dir(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    resolve_skill_dir_from(explicit, env::var_os("HOME"))
+}
+
+fn resolve_skill_dir_from(
+    explicit: Option<&Path>,
+    home: Option<OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(dir) = explicit {
+        return Ok(dir.to_path_buf());
+    }
+    let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
+        "HOME is not set; pass a directory with --install <DIR> or --check <DIR>".to_string()
+    })?;
+    Ok(PathBuf::from(home).join(".agents/skills/tmux-run"))
+}
+
+fn run_completion(cli: &CompletionCli) -> Result<i32, String> {
+    let contents = completion_script(cli.shell);
+    match cli.mode {
+        CompletionMode::Print => {
+            print!("{contents}");
+            Ok(0)
+        }
+        CompletionMode::Install => {
+            let path = completion_install_path(cli.shell)?;
+            install_bytes(&path, contents.as_bytes())
+        }
+        CompletionMode::Check => {
+            let path = completion_install_path(cli.shell)?;
+            let hint = format!("tmux-run completion {} --install", cli.shell.word());
+            check_file(&path, contents.as_bytes(), &hint)
+        }
+    }
+}
+
+fn completion_script(shell: Shell) -> &'static str {
+    match shell {
+        Shell::Bash => COMPLETION_BASH,
+        Shell::Zsh => COMPLETION_ZSH,
+        Shell::Fish => COMPLETION_FISH,
+    }
+}
+
+fn completion_install_path(shell: Shell) -> Result<PathBuf, String> {
+    completion_install_path_from(
+        shell,
+        env::var_os("XDG_DATA_HOME"),
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("HOME"),
+    )
+}
+
+fn completion_install_path_from(
+    shell: Shell,
+    xdg_data_home: Option<OsString>,
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, String> {
+    let home = home.as_deref();
+    match shell {
+        Shell::Bash => {
+            Ok(xdg_data_dir(xdg_data_home, home)?.join("bash-completion/completions/tmux-run"))
+        }
+        Shell::Zsh => Ok(xdg_data_dir(xdg_data_home, home)?.join("zsh/site-functions/_tmux-run")),
+        Shell::Fish => {
+            Ok(xdg_config_dir(xdg_config_home, home)?.join("fish/completions/tmux-run.fish"))
+        }
+    }
+}
+
+fn xdg_data_dir(xdg: Option<OsString>, home: Option<&OsStr>) -> Result<PathBuf, String> {
+    if let Some(dir) = xdg.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = home
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "HOME is not set".to_string())?;
+    Ok(PathBuf::from(home).join(".local/share"))
+}
+
+fn xdg_config_dir(xdg: Option<OsString>, home: Option<&OsStr>) -> Result<PathBuf, String> {
+    if let Some(dir) = xdg.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = home
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "HOME is not set".to_string())?;
+    Ok(PathBuf::from(home).join(".config"))
+}
+
+enum WriteOutcome {
+    Created,
+    Updated,
+    UpToDate,
+}
+
+fn install_bytes(path: &Path, contents: &[u8]) -> Result<i32, String> {
+    match write_if_changed(path, contents)? {
+        WriteOutcome::Created => println!("created {}", path.display()),
+        WriteOutcome::Updated => println!("updated {}", path.display()),
+        WriteOutcome::UpToDate => println!("up to date {}", path.display()),
+    }
+    Ok(0)
+}
+
+fn write_if_changed(path: &Path, contents: &[u8]) -> Result<WriteOutcome, String> {
+    match fs::read(path) {
+        Ok(existing) if existing == contents => Ok(WriteOutcome::UpToDate),
+        Ok(_) => {
+            fs::write(path, contents)
+                .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+            Ok(WriteOutcome::Updated)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+            }
+            fs::write(path, contents)
+                .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+            Ok(WriteOutcome::Created)
+        }
+        Err(err) => Err(format!("failed to read {}: {err}", path.display())),
+    }
+}
+
+fn check_file(path: &Path, contents: &[u8], install_hint: &str) -> Result<i32, String> {
+    match fs::read(path) {
+        Ok(existing) if existing == contents => {
+            println!("up to date {}", path.display());
+            Ok(0)
+        }
+        _ => {
+            eprintln!("error: {} is missing or out of date", path.display());
+            eprintln!("       run: {install_hint}");
+            Ok(1)
+        }
+    }
+}
+
+fn list_sessions(prefix: Option<&OsStr>) -> Vec<String> {
+    list_sessions_in(&state_root(), prefix)
+}
+
+fn list_sessions_in(root: &Path, prefix: Option<&OsStr>) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return names;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if !entry.path().join("output.log").is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some(prefix) = prefix
+            && !name.as_bytes().starts_with(prefix.as_bytes())
+        {
+            continue;
+        }
+        names.push(name);
+    }
+
+    names.sort();
+    names
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     #[test]
     fn parses_expected_cli_shape() {
@@ -513,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_help_flags() {
+    fn parses_help_and_version_flags() {
         assert_eq!(
             parse_args(["--help"].into_iter().map(OsString::from)).unwrap(),
             CliAction::Help
@@ -522,12 +937,21 @@ mod tests {
             parse_args(["-h"].into_iter().map(OsString::from)).unwrap(),
             CliAction::Help
         );
+        assert_eq!(
+            parse_args(["--version"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Version
+        );
+        assert_eq!(
+            parse_args(["-V"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Version
+        );
     }
 
     #[test]
     fn rejects_missing_separator_and_command() {
         assert!(parse_args(["build", "cargo"].into_iter().map(OsString::from)).is_err());
         assert!(parse_args(["build", "--"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(Vec::<OsString>::new()).is_err());
     }
 
     #[test]
@@ -538,15 +962,49 @@ mod tests {
 
     #[test]
     fn renders_script_preserving_argument_boundaries() {
-        let script = render_script(&[
+        let script = String::from_utf8(render_script(&[
             OsString::from("printf"),
             OsString::from("%s\\n"),
             OsString::from("hello world"),
             OsString::from("it's ok"),
-        ]);
+        ]))
+        .unwrap();
 
         assert!(script.contains("cmd=( 'printf' '%s\\n' 'hello world' 'it'\\''s ok' )"));
         assert!(script.contains("printf '__DONE__:%s\\n' \"$status\""));
+    }
+
+    #[test]
+    fn renders_script_byte_for_byte_for_non_ascii_and_quotes() {
+        let script = String::from_utf8(render_script(&[
+            OsString::from("printf"),
+            OsString::from("café"),
+            OsString::from(""),
+            OsString::from("a'b"),
+        ]))
+        .unwrap();
+
+        assert!(script.contains("'café'"));
+        assert!(script.contains("''"));
+        assert!(script.contains("'a'\\''b'"));
+        assert!(!script.contains("cafÃ©"));
+    }
+
+    #[test]
+    fn quote_bytes_preserves_bytes_and_escapes_single_quotes() {
+        assert_eq!(quote_bytes(b""), b"''");
+        assert_eq!(quote_bytes(b"caf\xc3\xa9"), b"'caf\xc3\xa9'");
+        assert_eq!(quote_bytes(b"a'b"), b"'a'\\''b'");
+    }
+
+    #[test]
+    fn shell_quote_for_display_handles_empty_and_quotes() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(
+            shell_quote_path(Path::new(OsStr::new("/tmp/a b"))),
+            "'/tmp/a b'"
+        );
     }
 
     #[test]
@@ -630,6 +1088,281 @@ mod tests {
     }
 
     #[test]
+    fn parses_skill_subcommand() {
+        assert_eq!(
+            parse_args(["skill"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Skill(SkillCli {
+                mode: SkillMode::Print,
+                dir: None
+            })
+        );
+        assert_eq!(
+            parse_args(["skill", "--install"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Skill(SkillCli {
+                mode: SkillMode::Install,
+                dir: None
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["skill", "--install", "/tmp/s"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Skill(SkillCli {
+                mode: SkillMode::Install,
+                dir: Some(PathBuf::from("/tmp/s"))
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["skill", "--check", "/tmp/s"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Skill(SkillCli {
+                mode: SkillMode::Check,
+                dir: Some(PathBuf::from("/tmp/s"))
+            })
+        );
+    }
+
+    #[test]
+    fn parses_completion_subcommand() {
+        assert_eq!(
+            parse_args(["completion", "bash"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Completion(CompletionCli {
+                shell: Shell::Bash,
+                mode: CompletionMode::Print
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["completion", "fish", "--install"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Completion(CompletionCli {
+                shell: Shell::Fish,
+                mode: CompletionMode::Install
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["completion", "zsh", "--check"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Completion(CompletionCli {
+                shell: Shell::Zsh,
+                mode: CompletionMode::Check
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_usage_errors() {
+        assert!(parse_args(["completion"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(["completion", "nope"].into_iter().map(OsString::from)).is_err());
+        assert!(
+            parse_args(
+                ["skill", "--install", "--check"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(parse_args(["__complete"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(["__complete", "other"].into_iter().map(OsString::from)).is_err());
+        assert!(
+            parse_args(
+                ["__complete", "sessions", "a", "b"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn skill_dir_requires_home_without_explicit_dir() {
+        assert_eq!(
+            resolve_skill_dir_from(None, Some(OsString::from("/home/u"))).unwrap(),
+            PathBuf::from("/home/u/.agents/skills/tmux-run")
+        );
+        assert!(resolve_skill_dir_from(None, None).is_err());
+        assert_eq!(
+            resolve_skill_dir_from(Some(Path::new("/custom")), None).unwrap(),
+            PathBuf::from("/custom")
+        );
+    }
+
+    #[test]
+    fn resolves_completion_install_paths() {
+        assert_eq!(
+            completion_install_path_from(
+                Shell::Bash,
+                Some(OsString::from("/data")),
+                Some(OsString::from("/cfg")),
+                Some(OsString::from("/home/u")),
+            )
+            .unwrap(),
+            PathBuf::from("/data/bash-completion/completions/tmux-run")
+        );
+        assert_eq!(
+            completion_install_path_from(Shell::Zsh, None, None, Some(OsString::from("/home/u")),)
+                .unwrap(),
+            PathBuf::from("/home/u/.local/share/zsh/site-functions/_tmux-run")
+        );
+        assert_eq!(
+            completion_install_path_from(
+                Shell::Fish,
+                None,
+                Some(OsString::from("/cfg")),
+                Some(OsString::from("/home/u")),
+            )
+            .unwrap(),
+            PathBuf::from("/cfg/fish/completions/tmux-run.fish")
+        );
+        assert!(completion_install_path_from(Shell::Bash, None, None, None).is_err());
+    }
+
+    #[test]
+    fn skill_install_then_check_cycle() {
+        let dir = test_dir("skill");
+        let install = SkillCli {
+            mode: SkillMode::Install,
+            dir: Some(dir.clone()),
+        };
+        let check = SkillCli {
+            mode: SkillMode::Check,
+            dir: Some(dir.clone()),
+        };
+        let path = dir.join("SKILL.md");
+
+        assert_eq!(run_skill(&install).unwrap(), 0);
+        assert_eq!(fs::read(&path).unwrap(), SKILL.as_bytes());
+
+        assert_eq!(run_skill(&check).unwrap(), 0);
+
+        let mut edited = SKILL.as_bytes().to_vec();
+        edited[0] ^= 0xff;
+        fs::write(&path, &edited).unwrap();
+        assert_eq!(run_skill(&check).unwrap(), 1);
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(run_skill(&check).unwrap(), 1);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn completion_install_then_check_cycle() {
+        let dir = test_dir("completion");
+        let path = dir.join("tmux-run.bash");
+        let contents = COMPLETION_BASH.as_bytes();
+
+        assert_eq!(install_bytes(&path, contents).unwrap(), 0);
+        assert_eq!(fs::read(&path).unwrap(), contents);
+        assert_eq!(
+            check_file(&path, contents, "tmux-run completion bash --install").unwrap(),
+            0
+        );
+
+        let mut edited = contents.to_vec();
+        edited[0] ^= 0xff;
+        fs::write(&path, &edited).unwrap();
+        assert_eq!(
+            check_file(&path, contents, "tmux-run completion bash --install").unwrap(),
+            1
+        );
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            check_file(&path, contents, "tmux-run completion bash --install").unwrap(),
+            1
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_skill_declares_matching_name() {
+        let frontmatter = SKILL
+            .split("---")
+            .nth(1)
+            .expect("skill must have YAML frontmatter");
+        assert!(
+            frontmatter
+                .lines()
+                .any(|line| line.trim() == "name: tmux-run"),
+            "skill frontmatter must declare `name: tmux-run`"
+        );
+    }
+
+    #[test]
+    fn completion_scripts_contain_required_tokens() {
+        for (label, script) in [
+            ("bash", COMPLETION_BASH),
+            ("zsh", COMPLETION_ZSH),
+            ("fish", COMPLETION_FISH),
+        ] {
+            for token in [
+                "wait",
+                "skill",
+                "completion",
+                "__complete",
+                "--help",
+                "--version",
+            ] {
+                assert!(
+                    script.contains(token),
+                    "{label} script must contain `{token}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lists_sessions_with_prefix_filtering() {
+        let root = test_dir("complete");
+        let make = |name: &str, log: bool| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            if log {
+                fs::write(dir.join("output.log"), "x").unwrap();
+            }
+        };
+        make("build_1", true);
+        make("deploy_2", true);
+        make("no-log_3", false);
+        make("build_2", true);
+
+        assert_eq!(
+            list_sessions_in(&root, None),
+            vec![
+                "build_1".to_string(),
+                "build_2".to_string(),
+                "deploy_2".to_string()
+            ]
+        );
+        assert_eq!(
+            list_sessions_in(&root, Some(OsStr::new("build"))),
+            vec!["build_1".to_string(), "build_2".to_string()]
+        );
+        assert_eq!(
+            list_sessions_in(&root, Some(OsStr::new("nope"))),
+            Vec::<String>::new()
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn resolves_state_root_from_environment_values() {
         assert_eq!(
             state_root_from(
@@ -703,15 +1436,5 @@ mod tests {
         let dir = env::temp_dir().join(format!("tmux-run-test-{label}-{}", unique_suffix()));
         fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn quotes_empty_and_single_quote_bytes() {
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-        assert_eq!(
-            shell_quote_path(Path::new(OsStr::new("/tmp/a b"))),
-            "'/tmp/a b'"
-        );
     }
 }
