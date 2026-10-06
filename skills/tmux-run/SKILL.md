@@ -84,3 +84,17 @@ Use tmux-run instead when the result must outlive the session as a file. A Herdr
 - Shell syntax on the tmux-run command line belongs to the calling shell: a pipe or redirect there applies to tmux-run's own output, not to the task. When the task needs pipes, redirects, or `&&`, wrap it in `bash -lc '...'`. Otherwise prefer direct arguments over nested quoting.
 - When tmux-run starts the tmux server itself, the task inherits the calling shell's working directory and environment. An already running server may not pass exported variables on, so pass the ones the task needs explicitly, as `env NAME=value <command>` or inside `bash -lc '...'`.
 - Never print secret values into commands or logs; the log stays on disk. Check a secret's presence only as `<set>` or `<unset>`.
+
+## Updating
+
+The skill text is embedded in the binary. To refresh this file from the installed `tmux-run`, run:
+
+```sh
+tmux-run skill --check <this skill's directory>
+```
+
+and, if it reports missing or stale, run:
+
+```sh
+tmux-run skill --install <this skill's directory>
+```

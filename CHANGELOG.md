@@ -1,0 +1,25 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-10-06
+
+### Added
+
+- Start a command in a detached tmux session with `tmux-run <task-name> -- <command>`, logging combined stdout and stderr and appending a `__DONE__:<status>` completion marker.
+- Wait for a session to finish with `tmux-run wait`, including `--timeout`.
+- The embedded agent skill, exposed via `tmux-run skill` with `--install` and `--check`.
+- Shell completion for bash, zsh, and fish via `tmux-run completion` with `--install` and `--check`.
+
+### Fixed
+
+- Shell quoting doubled the UTF-8 encoding of non-ASCII arguments.
+- A command whose output did not end with a newline concatenated with the completion marker, so `tmux-run wait` reported exit 3 instead of the recorded status.
+
+[Unreleased]: https://github.com/mhalder/tmux-run/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mhalder/tmux-run/releases/tag/v0.1.0

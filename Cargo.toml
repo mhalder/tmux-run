@@ -2,5 +2,12 @@
 name = "tmux-run"
 version = "0.1.0"
 edition = "2024"
+description = "Run a command in a detached tmux session, log its output, and collect its exit status later"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mhalder/tmux-run"
+readme = "README.md"
+rust-version = "1.88"
+keywords = ["tmux", "cli", "background-jobs", "process-management", "exit-status"]
+categories = ["command-line-utilities"]
 
 [dependencies]
