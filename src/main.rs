@@ -14,7 +14,7 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SESSION_CHECK_EVERY: u32 = 4;
 
-const SKILL: &str = include_str!("../docs/SKILL.md");
+const SKILL: &str = include_str!("../skills/tmux-run/SKILL.md");
 const COMPLETION_BASH: &str = include_str!("../completions/tmux-run.bash");
 const COMPLETION_ZSH: &str = include_str!("../completions/_tmux-run");
 const COMPLETION_FISH: &str = include_str!("../completions/tmux-run.fish");

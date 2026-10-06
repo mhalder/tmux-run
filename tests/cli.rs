@@ -1,9 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+// Both end-to-end tests drive the same global tmux state, and cargo runs tests
+// on parallel threads. Per-test `TMUX_TMPDIR` isolates the servers, and this
+// lock serializes the tests so one test's session teardown never overlaps
+// another's server startup; cargo's parallelism is not part of what they verify.
+static TMUX_LOCK: Mutex<()> = Mutex::new(());
 
 fn unique_suffix() -> String {
     let pid = std::process::id();
@@ -57,8 +64,90 @@ fn session_name_from(start_stdout: &[u8]) -> String {
         .expect("tmux-run did not print a session line")
 }
 
+/// A single diagnostic string appended to the `wait` assertion so a future
+/// `Missing` failure explains which process produced what, rather than leaving
+/// only the `wait` output to guess from.
+fn wait_failure_diagnostics(
+    start: &std::process::Output,
+    state_dir: &Path,
+    socket_dir: &Path,
+) -> String {
+    let mut parts = String::new();
+    parts.push_str(&format!(
+        "; start stdout: `{}`; start stderr: `{}`",
+        String::from_utf8_lossy(&start.stdout).trim(),
+        String::from_utf8_lossy(&start.stderr).trim()
+    ));
+    parts.push_str(&format!(
+        "; state_dir exists: {} contents: {}",
+        state_dir.exists(),
+        dir_contents(state_dir)
+    ));
+    parts.push_str(&format!(
+        "; socket_dir exists: {} contents: {}",
+        socket_dir.exists(),
+        dir_contents(socket_dir)
+    ));
+    let sessions = Command::new("tmux")
+        .env("TMUX_TMPDIR", socket_dir)
+        .args(["list-sessions"])
+        .output();
+    let sessions = match sessions {
+        Ok(output) => format!(
+            "status {}; stdout: `{}`; stderr: `{}`",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(err) => format!("error: {err}"),
+    };
+    parts.push_str(&format!("; tmux list-sessions: {sessions}"));
+    parts
+}
+
+fn dir_contents(dir: &Path) -> String {
+    if !dir.exists() {
+        return "n/a".to_string();
+    }
+    let mut entries = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let read = match std::fs::read_dir(&path) {
+            Ok(read) => read,
+            Err(err) => {
+                entries.push(format!("<unreadable {}: {err}>", path.display()));
+                continue;
+            }
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let kind = match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => 'd',
+                Ok(_) => 'f',
+                Err(_) => '?',
+            };
+            entries.push(format!("{kind}:{}", path.display()));
+            if entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+            {
+                stack.push(path);
+            }
+        }
+    }
+    if entries.is_empty() {
+        "empty".to_string()
+    } else {
+        entries.join("; ")
+    }
+}
+
 #[test]
 fn wait_reports_recorded_exit_status() {
+    let _tmux_guard = TMUX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(state_dir) = prepare_state_dir() else {
         return;
     };
@@ -92,8 +181,9 @@ fn wait_reports_recorded_exit_status() {
     assert_eq!(
         wait.status.code(),
         Some(7),
-        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}",
-        state_dir.display()
+        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}{}",
+        state_dir.display(),
+        wait_failure_diagnostics(&start, &state_dir, &socket_dir)
     );
     assert!(
         wait_stdout.contains("status: 7"),
@@ -110,6 +200,9 @@ fn wait_reports_recorded_exit_status() {
 
 #[test]
 fn wait_reports_status_when_output_lacks_trailing_newline() {
+    let _tmux_guard = TMUX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(state_dir) = prepare_state_dir() else {
         return;
     };
@@ -149,8 +242,9 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
     assert_eq!(
         wait.status.code(),
         Some(7),
-        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}",
-        state_dir.display()
+        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}{}",
+        state_dir.display(),
+        wait_failure_diagnostics(&start, &state_dir, &socket_dir)
     );
     assert!(
         wait_stdout.contains("status: 7"),
