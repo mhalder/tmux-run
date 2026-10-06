@@ -1,55 +1,84 @@
 # tmux-run
 
-`tmux-run` starts a command in a detached tmux session, writes stdout and stderr to a log file, and appends a completion marker when the command exits.
+[![CI](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml/badge.svg)](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/tmux-run)](https://crates.io/crates/tmux-run)
+[![license](https://img.shields.io/crates/l/tmux-run)](https://github.com/mhalder/tmux-run#license)
+
+`tmux-run` starts a command in a detached tmux session, writes its combined stdout and stderr to a log file, and appends a `__DONE__:<status>` completion marker when the command exits. Starting returns immediately; `tmux-run wait` blocks on the same session later and exits with the recorded status. It is a small, dependency-free wrapper around the usual hand-written tmux-and-logging boilerplate, designed for predictable behaviour rather than session management.
 
 ## Requirements
 
 - `tmux` installed and on `PATH`
 - `bash` (the command runs under bash)
+- a Unix-like system
 
 ## Install
 
 ```sh
-cargo install --path .
+cargo install tmux-run
+```
+
+Prebuilt binaries are published on [GitHub Releases](https://github.com/mhalder/tmux-run/releases) for:
+
+- Linux x86_64 and aarch64, static musl builds
+- macOS x86_64 and aarch64
+
+If neither fits, build from the repository:
+
+```sh
+cargo install --git https://github.com/mhalder/tmux-run
 ```
 
 ## Usage
 
-```sh
+```text
 tmux-run <task-name> -- <command> [args...]
 tmux-run wait <session-name> [--timeout <seconds>]
-tmux-run --help
+tmux-run skill [--install [DIR]] [--check [DIR]]
+tmux-run completion <bash|zsh|fish> [--install] [--check]
+tmux-run --help | -h
+tmux-run --version | -V
 ```
 
-Example:
+Start a task, then wait for it:
 
 ```sh
 tmux-run build -- cargo test
 tmux-run wait build_1234-5678 --timeout 600
 ```
 
+`--` separates tmux-run's own arguments from the command and its arguments. The command runs under `bash`; stdout and stderr are combined into the log.
+
 ## Wait for completion
 
-`tmux-run wait` blocks until the log records the completion marker, then exits with the recorded status:
+`tmux-run wait` blocks until the log records the completion marker, then exits with the recorded status. `--timeout <seconds>` bounds the wait.
 
-- the command's exit status
-- `124` if `--timeout` elapsed
-- `3` if the session ended or never existed without a marker
-- `2` on a usage error
+| Exit code | Meaning |
+| --------- | ------- |
+| 0 | ok |
+| 1 | a `--check` found the file missing or stale |
+| 2 | usage error |
+| 3 | `wait` found the session ended with no marker |
+| 124 | `wait` timed out |
 
-## Output
+When `wait` finds the marker it exits with the command's recorded exit status rather than one of the codes above.
+
+## Output and state
 
 `tmux-run` starts the session and exits immediately; it does not wait for the command to finish. On startup it prints:
 
-- the tmux session name
-- the log path
-- a `tmux-run wait` command for the session
-- the completion marker format, `__DONE__:<status>`
-- example attach and log-follow commands
+```text
+session: <session-name>
+log: <log-path>
+wait: tmux-run wait '<session-name>'
+completion marker: __DONE__:<status>
+attach: tmux attach -t '<session-name>'
+follow log: tail -f '<log-path>'
+```
 
-The marker is appended to the log when the command exits, with the command's exit status. Command stdout and stderr are combined into the log.
+The marker is appended to the log when the command exits, with the command's exit status.
 
-The task name is normalized for tmux and combined with the process id and timestamp to make the session name unique. The log and the generated bash script live in `tmux-run/<session>` under `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory; command arguments are written into the script with argument boundaries preserved, rather than interpolated directly into the tmux command line. State is never deleted automatically.
+The task name is normalized for tmux (every character outside ASCII letters, digits, `-`, and `_` becomes `_`) and combined with the process id and a timestamp to make the session name unique. State lives in `tmux-run/<session>/` under `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory, holding `run.sh` and `output.log`. The command and its arguments are written into `run.sh` with argument boundaries preserved, rather than interpolated directly into the tmux command line. Nothing is deleted automatically.
 
 ## Agent skill
 
@@ -58,3 +87,39 @@ The task name is normalized for tmux and combined with the process id and timest
 ```sh
 pi --skill docs/SKILL.md
 ```
+
+The skill text is embedded in the binary and exposed through `tmux-run skill`:
+
+```sh
+tmux-run skill --check
+tmux-run skill --install
+```
+
+The default directory is `~/.agents/skills/tmux-run`. `--install` creates the directory and writes `SKILL.md`, reporting whether it was created, updated, or already up to date. `--check` byte-compares the file against the embedded copy and exits `1` when it is missing or stale. To point the skill at another agent's skills directory, pass the directory explicitly:
+
+```sh
+tmux-run skill --install /path/to/agent/skills/tmux-run
+tmux-run skill --check /path/to/agent/skills/tmux-run
+```
+
+## Shell completion
+
+`tmux-run completion <shell>` prints the completion script for `bash`, `zsh`, or `fish`. `--install` writes it to the per-shell path, and `--check` byte-compares the installed file against the embedded copy.
+
+| Shell | Install path |
+| ----- | ------------ |
+| bash | `~/.local/share/bash-completion/completions/tmux-run` |
+| zsh | `~/.local/share/zsh/site-functions/_tmux-run` |
+| fish | `~/.config/fish/completions/tmux-run.fish` |
+
+zsh users need the `site-functions` directory on `$fpath` for the completion to load:
+
+```sh
+fpath=(~/.local/share/zsh/site-functions $fpath)
+```
+
+## License
+
+Licensed under MIT OR Apache-2.0. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).

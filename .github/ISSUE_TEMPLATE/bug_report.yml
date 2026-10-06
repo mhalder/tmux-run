@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a bug in tmux-run
+body:
+  - type: input
+    id: version
+    attributes:
+      label: tmux-run version
+      description: Output of `tmux-run --version`.
+      placeholder: "tmux-run 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      description: e.g. Ubuntu 24.04, macOS 14.
+      placeholder: "Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: tmux-version
+    attributes:
+      label: tmux version
+      description: Output of `tmux -V`.
+      placeholder: "tmux 3.4"
+    validations:
+      required: false
+  - type: input
+    id: bash-version
+    attributes:
+      label: bash version
+      description: Output of `bash --version`.
+      placeholder: "GNU bash, version 5.2.21(1)-release"
+    validations:
+      required: false
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version (if built from source)
+      description: Output of `rustc --version`.
+      placeholder: "rustc 1.88.0"
+    validations:
+      required: false
+  - type: textarea
+    id: command
+    attributes:
+      label: Command line
+      description: The exact command line you ran.
+      placeholder: "tmux-run build -- cargo test"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt or completion marker
+      description: Relevant lines from the log, including the `__DONE__:<status>` marker if present.
+      render: text
+    validations:
+      required: false
