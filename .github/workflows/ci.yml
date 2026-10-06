@@ -95,3 +95,17 @@ jobs:
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  completions:
+    name: Completions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install zsh and fish
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Check bash completion syntax
+        run: bash -n completions/tmux-run.bash
+      - name: Check zsh completion syntax
+        run: zsh -n completions/_tmux-run
+      - name: Check fish completion syntax
+        run: fish --no-execute completions/tmux-run.fish
