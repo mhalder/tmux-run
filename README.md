@@ -1,8 +1,7 @@
 # tmux-run
 
 [![CI](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml/badge.svg)](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/tmux-run)](https://crates.io/crates/tmux-run)
-[![license](https://img.shields.io/crates/l/tmux-run)](https://github.com/mhalder/tmux-run#license)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/mhalder/tmux-run#license)
 
 `tmux-run` starts a command in a detached tmux session, writes its combined stdout and stderr to a log file, and appends a `__DONE__:<status>` completion marker when the command exits. Starting returns immediately; `tmux-run wait` blocks on the same session later and exits with the recorded status. It is a small, dependency-free wrapper around the usual hand-written tmux-and-logging boilerplate, designed for predictable behaviour rather than session management.
 
@@ -15,19 +14,13 @@
 ## Install
 
 ```sh
-cargo install tmux-run
+cargo install --git https://github.com/mhalder/tmux-run
 ```
 
 Prebuilt binaries are published on [GitHub Releases](https://github.com/mhalder/tmux-run/releases) for:
 
 - Linux x86_64 and aarch64, static musl builds
 - macOS x86_64 and aarch64
-
-If neither fits, build from the repository:
-
-```sh
-cargo install --git https://github.com/mhalder/tmux-run
-```
 
 ## Usage
 
@@ -82,13 +75,7 @@ The task name is normalized for tmux (every character outside ASCII letters, dig
 
 ## Agent skill
 
-[`docs/SKILL.md`](docs/SKILL.md) is a [pi](https://pi.dev) skill that teaches a coding agent to run long commands with tmux-run: starting a task, waiting for it, reading its log and completion marker, and closing the session afterwards. Load it by path, for example:
-
-```sh
-pi --skill docs/SKILL.md
-```
-
-The skill text is embedded in the binary and exposed through `tmux-run skill`:
+The skill text is embedded in the binary, so `tmux-run skill --install` writes it wherever a coding agent looks for skills and `tmux-run skill --check` verifies it. The canonical source in this repository is [`skills/tmux-run/SKILL.md`](skills/tmux-run/SKILL.md).
 
 ```sh
 tmux-run skill --check
