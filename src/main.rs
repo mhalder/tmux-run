@@ -377,6 +377,9 @@ fn parse_skill(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, St
             .map_err(|_| "arguments must be valid UTF-8".to_string())?;
 
         let wanted = match arg.as_str() {
+            // `wait` already treats a leading `--help`/`-h` as the help request;
+            // accept it here too rather than failing with a usage error.
+            "--help" | "-h" => return Ok(CliAction::Help),
             "--install" => SkillMode::Install,
             "--check" => SkillMode::Check,
             other => return Err(format!("unexpected argument for skill: {other}")),
@@ -411,6 +414,10 @@ fn parse_completion(mut args: impl Iterator<Item = OsString>) -> Result<CliActio
         .ok_or_else(|| "completion requires a shell: bash, zsh, or fish".to_string())?
         .into_string()
         .map_err(|_| "shell must be valid UTF-8".to_string())?;
+
+    if shell_arg == "--help" || shell_arg == "-h" {
+        return Ok(CliAction::Help);
+    }
 
     let shell = match shell_arg.as_str() {
         "bash" => Shell::Bash,
@@ -1205,6 +1212,22 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            parse_args(
+                ["skill", "--install", "--help"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_args(
+                ["completion", "bash", "--help"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
         assert!(parse_args(["__complete"].into_iter().map(OsString::from)).is_err());
         assert!(parse_args(["__complete", "other"].into_iter().map(OsString::from)).is_err());
         assert!(
@@ -1215,6 +1238,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn subcommands_accept_a_leading_help_flag() {
+        for args in [
+            vec!["wait", "--help"],
+            vec!["wait", "-h"],
+            vec!["skill", "--help"],
+            vec!["skill", "-h"],
+            vec!["completion", "--help"],
+            vec!["completion", "-h"],
+        ] {
+            let label = format!("{args:?}");
+            assert_eq!(
+                parse_args(args.into_iter().map(OsString::from)).unwrap(),
+                CliAction::Help,
+                "expected help for {label}"
+            );
+        }
     }
 
     #[test]
