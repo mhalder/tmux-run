@@ -1,0 +1,40 @@
+#compdef tmux-run
+
+# Subcommands: wait skill completion __complete
+# Top-level options: --help --version
+
+_tmux-run() {
+    local -a sessions
+
+    if (( CURRENT == 2 )); then
+        compadd -- wait skill completion __complete --help --version
+        return
+    fi
+
+    case "${words[2]}" in
+        wait)
+            if [[ "${words[CURRENT-1]}" == "--timeout" ]]; then
+                return
+            fi
+            compadd -- --timeout
+            sessions=("${(@f)$(tmux-run __complete sessions "${words[CURRENT]}" 2>/dev/null)}")
+            compadd -a sessions
+            ;;
+        skill)
+            compadd -- --install --check
+            ;;
+        completion)
+            if (( CURRENT == 3 )); then
+                compadd -- bash zsh fish
+            else
+                compadd -- --install --check
+            fi
+            ;;
+        __complete)
+            compadd -- sessions
+            ;;
+        *)
+            compadd -- wait skill completion __complete --help --version
+            ;;
+    esac
+}
