@@ -31,6 +31,17 @@ fn prepare_state_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Creates a short-lived tmux socket directory under `/tmp`. tmux appends
+/// `/tmux-<uid>/default` to this path, and a unix socket path is limited to
+/// 104 bytes on macOS. `std::env::temp_dir()` is `$TMPDIR` there — a long
+/// `/var/folders` path — so a socket directory derived from it can overflow
+/// that limit; the short, fixed `/tmp` prefix keeps the socket reachable.
+fn prepare_socket_dir() -> PathBuf {
+    let dir = PathBuf::from(format!("/tmp/tmux-run-sock-{}", unique_suffix()));
+    std::fs::create_dir_all(&dir).expect("failed to create tmux socket dir");
+    dir
+}
+
 fn session_name_from(start_stdout: &[u8]) -> String {
     String::from_utf8_lossy(start_stdout)
         .lines()
@@ -44,11 +55,12 @@ fn wait_reports_recorded_exit_status() {
     let Some(state_dir) = prepare_state_dir() else {
         return;
     };
+    let socket_dir = prepare_socket_dir();
     let bin = env!("CARGO_BIN_EXE_tmux-run");
 
     let start = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args(["cli-e2e", "--", "bash", "-c", "exit 7"])
         .output()
         .expect("failed to run tmux-run");
@@ -63,7 +75,7 @@ fn wait_reports_recorded_exit_status() {
 
     let wait = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args(["wait", &session, "--timeout", "30"])
         .output()
         .expect("failed to run tmux-run wait");
@@ -82,10 +94,11 @@ fn wait_reports_recorded_exit_status() {
     );
 
     let _ = Command::new("tmux")
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args(["kill-session", "-t", &session])
         .output();
     let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
 #[test]
@@ -93,11 +106,12 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
     let Some(state_dir) = prepare_state_dir() else {
         return;
     };
+    let socket_dir = prepare_socket_dir();
     let bin = env!("CARGO_BIN_EXE_tmux-run");
 
     let start = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args([
             "cli-e2e-nl",
             "--",
@@ -118,7 +132,7 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
 
     let wait = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args(["wait", &session, "--timeout", "30"])
         .output()
         .expect("failed to run tmux-run wait");
@@ -137,8 +151,9 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
     );
 
     let _ = Command::new("tmux")
-        .env("TMUX_TMPDIR", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
         .args(["kill-session", "-t", &session])
         .output();
     let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(&socket_dir);
 }
