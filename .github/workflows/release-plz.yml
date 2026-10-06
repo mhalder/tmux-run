@@ -1,0 +1,100 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Create the tag once the release PR is merged. The tag push then runs
+  # release.yml, which builds the binaries, creates the GitHub release, and
+  # publishes to crates.io.
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'mhalder'
+    permissions:
+      contents: write
+      # release-plz checks whether the merged commit belongs to a release PR.
+      pull-requests: read
+    steps:
+      - name: Require the release token
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_PLZ_TOKEN" ]; then
+            echo "::error::RELEASE_PLZ_TOKEN is not set. Create a fine-grained PAT with Contents: write and Pull requests: write on this repository, add it as a repository secret, and re-run this workflow. See CONTRIBUTING.md."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # release-plz tags the released commit and pushes the tag with the
+          # checkout's credentials. A tag pushed with the default GITHUB_TOKEN
+          # does not start release.yml, so this token is the PAT.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          # Bumped by hand: Dependabot does not track tool versions.
+          tool: release-plz@0.3.169
+      # The release-plz action configures this for you; the CLI does not.
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Tag the release
+        run: release-plz release
+        env:
+          # The CLI reads GIT_TOKEN; the release-plz action maps GITHUB_TOKEN to it.
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  # Open or update the release PR: version bump, Cargo.lock, CHANGELOG.
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'mhalder'
+    permissions:
+      contents: write
+      pull-requests: write
+    # The release PR is updated on every push to main; a cancelled update
+    # leaves the PR stale.
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Require the release token
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_PLZ_TOKEN" ]; then
+            echo "::error::RELEASE_PLZ_TOKEN is not set. Create a fine-grained PAT with Contents: write and Pull requests: write on this repository, add it as a repository secret, and re-run this workflow. See CONTRIBUTING.md."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A release PR opened with the default GITHUB_TOKEN runs no CI, so it
+          # could never satisfy the required checks on main.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          # Bumped by hand: Dependabot does not track tool versions.
+          tool: release-plz@0.3.169
+      # release-plz commits the version bump to the release branch.
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Update the release PR
+        run: release-plz release-pr
+        env:
+          # The CLI reads GIT_TOKEN; the release-plz action maps GITHUB_TOKEN to it.
+          GIT_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
