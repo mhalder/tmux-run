@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn unique_suffix() -> String {
     let pid = std::process::id();
@@ -8,7 +11,11 @@ fn unique_suffix() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("{pid}-{nanos}")
+    // Clock granularity is not a uniqueness guarantee: macOS time has
+    // microsecond resolution, so two threads in the same process can observe
+    // the same pid and nanos. The counter makes each call unique regardless.
+    let counter = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!("{pid}-{nanos}-{counter}")
 }
 
 fn tmux_available() -> bool {
@@ -156,4 +163,38 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
         .output();
     let _ = std::fs::remove_dir_all(&state_dir);
     let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[test]
+fn unique_suffix_is_unique_across_threads() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const THREADS: usize = 16;
+    const PER_THREAD: usize = 64;
+
+    let seen = Arc::new(Mutex::new(HashSet::new()));
+    thread::scope(|scope| {
+        for _ in 0..THREADS {
+            let seen = Arc::clone(&seen);
+            scope.spawn(move || {
+                for _ in 0..PER_THREAD {
+                    let suffix = unique_suffix();
+                    let mut seen = seen.lock().unwrap();
+                    assert!(seen.insert(suffix.clone()), "duplicate suffix: {suffix}");
+                }
+            });
+        }
+    });
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), THREADS * PER_THREAD);
+    let sample: Vec<String> = seen.iter().take(3).cloned().collect();
+    println!(
+        "generated {} unique suffixes across {} threads (sample: {})",
+        seen.len(),
+        THREADS,
+        sample.join(", ")
+    );
 }
