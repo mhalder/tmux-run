@@ -580,8 +580,12 @@ fn session_exists(session_name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Read `__DONE__:<status>` from the last complete line of the log. Only the
-/// tail is read: the marker is appended last and the log can be large.
+/// Read `__DONE__:<status>` from the tail of the log. Only the tail is read:
+/// the marker is appended last and the log can be large. The marker is accepted
+/// either at the start of the last complete line (`__DONE__:0`), or concatenated
+/// onto the end of it when the command's output had no trailing newline
+/// (`no trailing newline__DONE__:0`). A trailing partial line is ignored so a
+/// torn read is a retry rather than a wrong status.
 fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     let mut file = match fs::File::open(log_path) {
         Ok(file) => file,
@@ -610,6 +614,31 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |position| position + 1);
     let text = String::from_utf8_lossy(&tail[..complete]);
+
+    // The marker is appended last, so inspect the last complete line first: it
+    // either starts with the marker, or the marker is concatenated onto the end
+    // of output that did not end with a newline.
+    if let Some(last_line) = text.lines().next_back() {
+        let line = last_line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return Ok(None);
+            }
+            let status = rest
+                .parse::<u8>()
+                .map_err(|_| format!("malformed completion marker: {last_line}"))?;
+            return Ok(Some(status));
+        }
+        if let Some(at) = line.rfind(DONE_MARKER_PREFIX) {
+            let rest = line[at + DONE_MARKER_PREFIX.len()..].trim();
+            if !rest.is_empty()
+                && let Ok(status) = rest.parse::<u8>()
+            {
+                return Ok(Some(status));
+            }
+        }
+    }
 
     for line in text.lines().rev() {
         if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
@@ -1394,6 +1423,10 @@ mod tests {
         assert_eq!(read_done_marker(&log).unwrap(), Some(7));
         fs::write(&log, "__DONE__:1\nmore\n__DONE__:2\n").unwrap();
         assert_eq!(read_done_marker(&log).unwrap(), Some(2));
+        fs::write(&log, "no trailing newline__DONE__:0\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(0));
+        fs::write(&log, "x__DONE__:7\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(7));
         // A torn write is a retry, not a status.
         fs::write(&log, "__DONE__:1").unwrap();
         assert_eq!(read_done_marker(&log).unwrap(), None);
