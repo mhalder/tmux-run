@@ -1,7 +1,7 @@
 # tmux-run
 
 [![CI](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml/badge.svg)](https://github.com/mhalder/tmux-run/actions/workflows/ci.yml)
-[![license](https://img.shields.io/crates/l/tmux-run)](https://github.com/mhalder/tmux-run#license)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/mhalder/tmux-run#license)
 
 `tmux-run` starts a command in a detached tmux session, writes its combined stdout and stderr to a log file, and appends a `__DONE__:<status>` completion marker when the command exits. Starting returns immediately; `tmux-run wait` blocks on the same session later and exits with the recorded status. It is a small, dependency-free wrapper around the usual hand-written tmux-and-logging boilerplate, designed for predictable behaviour rather than session management.
 
