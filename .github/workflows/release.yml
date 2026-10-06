@@ -8,9 +8,21 @@ permissions:
   contents: read
 
 jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Stop before anything is built or released when the tag disagrees with
+      # Cargo.toml or has no dated CHANGELOG.md section. release-plz creates
+      # both together, so this only fires on a hand-made tag.
+      - name: Check the tag against the declared version
+        run: sh scripts/check-version.sh "$GITHUB_REF_NAME"
+
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:

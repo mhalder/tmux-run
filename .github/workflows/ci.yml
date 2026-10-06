@@ -13,6 +13,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The version in Cargo.toml must have a dated CHANGELOG.md section. The
+      # release workflow runs the same check against the pushed tag.
+      - name: Check version consistency
+        run: sh scripts/check-version.sh
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

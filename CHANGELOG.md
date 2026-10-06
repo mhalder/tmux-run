@@ -20,6 +20,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Shell quoting doubled the UTF-8 encoding of non-ASCII arguments.
 - A command whose output did not end with a newline concatenated with the completion marker, so `tmux-run wait` reported exit 3 instead of the recorded status.
-
-[Unreleased]: https://github.com/mhalder/tmux-run/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mhalder/tmux-run/releases/tag/v0.1.0
