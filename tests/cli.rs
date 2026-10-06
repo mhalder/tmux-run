@@ -48,6 +48,7 @@ fn wait_reports_recorded_exit_status() {
 
     let start = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &state_dir)
         .args(["cli-e2e", "--", "bash", "-c", "exit 7"])
         .output()
         .expect("failed to run tmux-run");
@@ -62,6 +63,7 @@ fn wait_reports_recorded_exit_status() {
 
     let wait = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &state_dir)
         .args(["wait", &session, "--timeout", "30"])
         .output()
         .expect("failed to run tmux-run wait");
@@ -71,7 +73,8 @@ fn wait_reports_recorded_exit_status() {
     assert_eq!(
         wait.status.code(),
         Some(7),
-        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}"
+        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}",
+        state_dir.display()
     );
     assert!(
         wait_stdout.contains("status: 7"),
@@ -79,6 +82,7 @@ fn wait_reports_recorded_exit_status() {
     );
 
     let _ = Command::new("tmux")
+        .env("TMUX_TMPDIR", &state_dir)
         .args(["kill-session", "-t", &session])
         .output();
     let _ = std::fs::remove_dir_all(&state_dir);
@@ -93,6 +97,7 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
 
     let start = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &state_dir)
         .args([
             "cli-e2e-nl",
             "--",
@@ -113,6 +118,7 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
 
     let wait = Command::new(bin)
         .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &state_dir)
         .args(["wait", &session, "--timeout", "30"])
         .output()
         .expect("failed to run tmux-run wait");
@@ -122,7 +128,8 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
     assert_eq!(
         wait.status.code(),
         Some(7),
-        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}"
+        "expected wait to exit with recorded status 7; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}",
+        state_dir.display()
     );
     assert!(
         wait_stdout.contains("status: 7"),
@@ -130,6 +137,7 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
     );
 
     let _ = Command::new("tmux")
+        .env("TMUX_TMPDIR", &state_dir)
         .args(["kill-session", "-t", &session])
         .output();
     let _ = std::fs::remove_dir_all(&state_dir);
