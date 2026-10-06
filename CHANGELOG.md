@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/mhalder/tmux-run/compare/v0.1.0...v0.1.1) - 2026-10-06
+
+### Fixed
+
+- accept --help for the skill and completion subcommands ([#3](https://github.com/mhalder/tmux-run/pull/3))
+
 ## [0.1.0] - 2026-10-06
 
 ### Added
