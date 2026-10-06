@@ -39,7 +39,7 @@ _tmux_run() {
             if [[ "$prev" == "completion" ]]; then
                 COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
             else
-                COMPREPLY=( $(compgen -W "$shells $completion_options" -- "$cur") )
+                COMPREPLY=( $(compgen -W "$completion_options" -- "$cur") )
             fi
             ;;
         __complete)

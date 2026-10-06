@@ -1304,6 +1304,7 @@ mod tests {
         );
     }
 
+    // Fails when a subcommand or flag is added without updating the completion scripts.
     #[test]
     fn completion_scripts_contain_required_tokens() {
         for (label, script) in [

@@ -15,8 +15,8 @@ complete -c tmux-run -n '__fish_seen_subcommand_from wait' -a '(tmux-run __compl
 complete -c tmux-run -n '__fish_seen_subcommand_from skill' -l install -d 'Install the skill'
 complete -c tmux-run -n '__fish_seen_subcommand_from skill' -l check -d 'Check the installed skill'
 
-complete -c tmux-run -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish' -d 'Shell'
-complete -c tmux-run -n '__fish_seen_subcommand_from completion' -l install -d 'Install the completion'
-complete -c tmux-run -n '__fish_seen_subcommand_from completion' -l check -d 'Check the installed completion'
+complete -c tmux-run -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish' -a 'bash zsh fish' -d 'Shell' -f
+complete -c tmux-run -n '__fish_seen_subcommand_from completion; and __fish_seen_subcommand_from bash zsh fish' -a '--install' -d 'Install the completion' -f
+complete -c tmux-run -n '__fish_seen_subcommand_from completion; and __fish_seen_subcommand_from bash zsh fish' -a '--check' -d 'Check the installed completion' -f
 
 complete -c tmux-run -n '__fish_seen_subcommand_from __complete' -a sessions -d 'Subcommand'
