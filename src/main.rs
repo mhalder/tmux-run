@@ -405,7 +405,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
         return parse_list(args);
     }
     if first == "show" {
-        return parse_show(args);
+        return parse_show_subcommand(args);
     }
     if first == "skill" {
         return parse_skill(args);
@@ -505,6 +505,16 @@ fn parse_wait(
 }
 
 fn parse_list(args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `list -- <command>` still names a task literally called "list".
+    let mut args = args.peekable();
+    if args
+        .peek()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("--"))
+    {
+        args.next();
+        return parse_command("list".to_string(), args);
+    }
+
     let mut json = false;
 
     for arg in args {
@@ -521,13 +531,24 @@ fn parse_list(args: impl Iterator<Item = OsString>) -> Result<CliAction, String>
     Ok(CliAction::List(ListCli { json }))
 }
 
-fn parse_show(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
-    let session_name = args
-        .next()
-        .ok_or_else(|| "missing session name after `show`".to_string())?
-        .into_string()
-        .map_err(|_| "session name must be valid UTF-8".to_string())?;
+fn parse_show_subcommand(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `show -- <command>` still names a task literally called "show".
+    match args.next() {
+        Some(separator) if separator == "--" => parse_command("show".to_string(), args),
+        Some(session) => {
+            let session_name = session
+                .into_string()
+                .map_err(|_| "session name must be valid UTF-8".to_string())?;
+            parse_show(session_name, args)
+        }
+        None => Err("missing session name after `show`".to_string()),
+    }
+}
 
+fn parse_show(
+    session_name: String,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<CliAction, String> {
     if session_name == "--help" || session_name == "-h" {
         return Ok(CliAction::Help);
     }
@@ -879,7 +900,9 @@ fn session_state(log_path: &Path, alive: impl FnOnce() -> bool) -> Result<Sessio
 
 /// The last `max_lines` lines of `log_path`, reading at most `LOG_TAIL_BYTES`
 /// from the end of the file. A trailing partial line (no final newline) is kept
-/// as a line for display, unlike marker detection which ignores it.
+/// as a line for display, unlike marker detection which ignores it. When the
+/// read starts mid-line because the log exceeds `LOG_TAIL_BYTES`, that leading
+/// fragment is dropped so only complete lines are shown.
 fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
     let mut file = fs::File::open(log_path)
         .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
@@ -888,9 +911,11 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
         .metadata()
         .map_err(|err| format!("failed to stat {}: {err}", log_path.display()))?
         .len();
+    let mut truncated = false;
     if len > LOG_TAIL_BYTES {
         file.seek(SeekFrom::Start(len - LOG_TAIL_BYTES))
             .map_err(|err| format!("failed to seek {}: {err}", log_path.display()))?;
+        truncated = true;
     }
 
     let mut tail = Vec::new();
@@ -905,6 +930,11 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
     let mut lines: Vec<&str> = text.split('\n').collect();
     if text.ends_with('\n') {
         lines.pop();
+    }
+    // The read started mid-line, so the first element is a fragment of a
+    // line cut by the seek; drop it so only complete lines are shown.
+    if truncated && !lines.is_empty() {
+        lines.remove(0);
     }
 
     let start = lines.len().saturating_sub(max_lines as usize);
@@ -1375,6 +1405,44 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_task_named_list() {
+        let CliAction::Run(cli) =
+            parse_args(["list", "--", "true"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected run action");
+        };
+
+        assert_eq!(cli.task_name, "list");
+    }
+
+    #[test]
+    fn keeps_a_task_named_show() {
+        let CliAction::Run(cli) =
+            parse_args(["show", "--", "true"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected run action");
+        };
+
+        assert_eq!(cli.task_name, "show");
+    }
+
+    #[test]
+    fn list_flag_and_show_session_still_parse_alongside_task_fallback() {
+        assert_eq!(
+            parse_args(["list", "--json"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::List(ListCli { json: true })
+        );
+
+        let CliAction::Show(show) =
+            parse_args(["show", "build_1-2"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected show action");
+        };
+        assert_eq!(show.session_name, "build_1-2");
+        assert_eq!(show.lines, 40);
+    }
+
+    #[test]
     fn rejects_invalid_wait_arguments() {
         assert!(parse_args(["wait"].into_iter().map(OsString::from)).is_err());
         assert!(parse_args(["wait", "../evil"].into_iter().map(OsString::from)).is_err());
@@ -1670,14 +1738,28 @@ mod tests {
                 "__complete",
                 "--help",
                 "--version",
-                "--json",
-                "--lines",
             ] {
                 assert!(
                     script.contains(token),
                     "{label} script must contain `{token}`"
                 );
             }
+        }
+
+        // bash and zsh spell flags literally; fish spells them `-l <flag>`.
+        for (label, script) in [("bash", COMPLETION_BASH), ("zsh", COMPLETION_ZSH)] {
+            for token in ["--json", "--lines"] {
+                assert!(
+                    script.contains(token),
+                    "{label} script must contain `{token}`"
+                );
+            }
+        }
+        for token in ["-l json", "-l lines"] {
+            assert!(
+                COMPLETION_FISH.contains(token),
+                "fish script must contain `{token}`"
+            );
         }
     }
 
@@ -1938,6 +2020,34 @@ mod tests {
 
         fs::write(&log, "\n").unwrap();
         assert_eq!(tail_lines(&log, 5).unwrap(), vec!["".to_string()]);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_drops_leading_fragment_when_log_exceeds_tail_window() {
+        let dir = test_dir("tail-truncate");
+        let log = dir.join("output.log");
+
+        // 20 lines of 999 'a's plus a newline each (~20000 bytes) exceed
+        // LOG_TAIL_BYTES (8 KiB), so the seek lands mid-line.
+        let line = "a".repeat(999);
+        let mut contents = String::new();
+        for _ in 0..20 {
+            contents.push_str(&line);
+            contents.push('\n');
+        }
+        fs::write(&log, &contents).unwrap();
+
+        let lines = tail_lines(&log, 5).unwrap();
+        assert_eq!(lines.len(), 5);
+        for returned in &lines {
+            assert_eq!(
+                returned.len(),
+                999,
+                "expected a complete line, not a seek fragment: {returned:?}"
+            );
+        }
 
         fs::remove_dir_all(dir).unwrap();
     }
