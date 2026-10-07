@@ -21,6 +21,8 @@ const COMPLETION_FISH: &str = include_str!("../completions/tmux-run.fish");
 
 const HELP: &str = "Usage: tmux-run <task-name> -- <command> [args...]
        tmux-run wait <session-name> [--timeout <seconds>]
+       tmux-run list [--json]
+       tmux-run show <session-name> [--lines <n>] [--json]
        tmux-run skill [--install [DIR]] [--check [DIR]]
        tmux-run completion <bash|zsh|fish> [--install] [--check]
        tmux-run --help | -h
@@ -39,6 +41,15 @@ Wait arguments:
   <session-name>       Session name printed by tmux-run
   --timeout <secs>     Give up after this long and exit 124
 
+List subcommand:
+  tmux-run list                 List every session's state and log path
+  tmux-run list --json          Print the same list as a JSON array
+
+Show subcommand:
+  tmux-run show <session-name>                  Show a session's state and the tail of its log
+  tmux-run show <session-name> --lines <n>      Show the last <n> log lines (default 40)
+  tmux-run show <session-name> --json           Print the session state and log tail as JSON
+
 Skill subcommand:
   tmux-run skill                    Print the embedded agent skill to stdout
   tmux-run skill --install [DIR]    Write DIR/SKILL.md (default ~/.agents/skills/tmux-run)
@@ -53,13 +64,17 @@ Completion subcommand:
 Exit status:
   <status>    status recorded in the completion marker (wait only)
   124         --timeout elapsed
-  3           session ended or never existed without a marker
+  3           session ended or never existed without a marker, or no log for a session (show)
   2           usage error
   1           --check found the installed file missing or stale
 
 Examples:
   tmux-run build -- cargo test
   tmux-run wait build_1234-5678 --timeout 600
+  tmux-run list
+  tmux-run list --json
+  tmux-run show build_1234-5678
+  tmux-run show build_1234-5678 --lines 20 --json
   tmux-run deploy -- bash -lc 'echo start; ./deploy.sh'
   tmux-run skill --install
   tmux-run completion bash --install
@@ -71,6 +86,8 @@ enum CliAction {
     Version,
     Run(Cli),
     Wait(WaitCli),
+    List(ListCli),
+    Show(ShowCli),
     Skill(SkillCli),
     Completion(CompletionCli),
     CompleteSessions(Option<OsString>),
@@ -86,6 +103,51 @@ struct Cli {
 struct WaitCli {
     session_name: String,
     timeout: Option<Duration>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ListCli {
+    json: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ShowCli {
+    session_name: String,
+    lines: u64,
+    json: bool,
+}
+
+/// A task's current state as derived from its log marker and tmux liveness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionState {
+    Running,
+    Done(u8),
+    Ended,
+}
+
+impl SessionState {
+    fn state_word(self) -> &'static str {
+        match self {
+            SessionState::Running => "running",
+            SessionState::Done(_) => "done",
+            SessionState::Ended => "ended",
+        }
+    }
+
+    fn status(self) -> Option<u8> {
+        match self {
+            SessionState::Done(status) => Some(status),
+            SessionState::Running | SessionState::Ended => None,
+        }
+    }
+
+    fn human(self) -> String {
+        match self {
+            SessionState::Running => "running".to_string(),
+            SessionState::Done(status) => format!("done {status}"),
+            SessionState::Ended => "ended".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -145,6 +207,8 @@ fn main() {
             eprintln!("error: {err}");
             eprintln!("usage: tmux-run <task-name> -- <command> [args...]");
             eprintln!("       tmux-run wait <session-name> [--timeout <seconds>]");
+            eprintln!("       tmux-run list [--json]");
+            eprintln!("       tmux-run show <session-name> [--lines <n>] [--json]");
             process::exit(2);
         }
     }
@@ -165,6 +229,8 @@ fn run() -> Result<i32, String> {
             Ok(0)
         }
         CliAction::Wait(wait) => run_wait(&wait),
+        CliAction::List(list) => run_list(&list),
+        CliAction::Show(show) => run_show(&show),
         CliAction::Skill(skill) => run_skill(&skill),
         CliAction::Completion(completion) => run_completion(&completion),
         CliAction::CompleteSessions(prefix) => {
@@ -200,6 +266,71 @@ fn run_wait(wait: &WaitCli) -> Result<i32, String> {
             Ok(3)
         }
     }
+}
+
+fn run_list(cli: &ListCli) -> Result<i32, String> {
+    let root = state_root();
+    let names = list_sessions_in(&root, None);
+
+    if cli.json {
+        let mut objects = Vec::with_capacity(names.len());
+        for name in names {
+            let log = log_path_for(&name);
+            let state = session_state(&log, || session_exists(&name))?;
+            objects.push(format!(
+                "{{\"session\":{},\"state\":{},\"status\":{},\"log\":{}}}",
+                json_string(&name),
+                json_string(state.state_word()),
+                json_status(state.status()),
+                json_string(&log.display().to_string()),
+            ));
+        }
+        println!("[{}]", objects.join(","));
+    } else {
+        for name in names {
+            let log = log_path_for(&name);
+            let state = session_state(&log, || session_exists(&name))?;
+            println!("{}\t{}\t{}", name, state.human(), log.display());
+        }
+    }
+
+    Ok(0)
+}
+
+fn run_show(cli: &ShowCli) -> Result<i32, String> {
+    let log = log_path_for(&cli.session_name);
+    if !log.exists() {
+        eprintln!("error: no log for {}", cli.session_name);
+        return Ok(3);
+    }
+
+    let state = session_state(&log, || session_exists(&cli.session_name))?;
+    let lines = tail_lines(&log, cli.lines)?;
+
+    if cli.json {
+        let mut json_lines = Vec::with_capacity(lines.len());
+        for line in &lines {
+            json_lines.push(json_string(line));
+        }
+        println!(
+            "{{\"session\":{},\"state\":{},\"status\":{},\"log\":{},\"lines\":[{}]}}",
+            json_string(&cli.session_name),
+            json_string(state.state_word()),
+            json_status(state.status()),
+            json_string(&log.display().to_string()),
+            json_lines.join(","),
+        );
+    } else {
+        println!("session: {}", cli.session_name);
+        println!("status: {}", state.human());
+        println!("log: {}", log.display());
+        println!();
+        for line in &lines {
+            println!("{line}");
+        }
+    }
+
+    Ok(0)
 }
 
 fn start_task(cli: &Cli) -> Result<(), String> {
@@ -269,6 +400,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
     }
     if first == "wait" {
         return parse_wait_subcommand(args);
+    }
+    if first == "list" {
+        return parse_list(args);
+    }
+    if first == "show" {
+        return parse_show_subcommand(args);
     }
     if first == "skill" {
         return parse_skill(args);
@@ -364,6 +501,91 @@ fn parse_wait(
     Ok(CliAction::Wait(WaitCli {
         session_name,
         timeout,
+    }))
+}
+
+fn parse_list(args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `list -- <command>` still names a task literally called "list".
+    let mut args = args.peekable();
+    if args
+        .peek()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("--"))
+    {
+        args.next();
+        return parse_command("list".to_string(), args);
+    }
+
+    let mut json = false;
+
+    for arg in args {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+        match arg.as_str() {
+            "--json" => json = true,
+            "--help" | "-h" => return Ok(CliAction::Help),
+            other => return Err(format!("unexpected argument for list: {other}")),
+        }
+    }
+
+    Ok(CliAction::List(ListCli { json }))
+}
+
+fn parse_show_subcommand(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `show -- <command>` still names a task literally called "show".
+    match args.next() {
+        Some(separator) if separator == "--" => parse_command("show".to_string(), args),
+        Some(session) => {
+            let session_name = session
+                .into_string()
+                .map_err(|_| "session name must be valid UTF-8".to_string())?;
+            parse_show(session_name, args)
+        }
+        None => Err("missing session name after `show`".to_string()),
+    }
+}
+
+fn parse_show(
+    session_name: String,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<CliAction, String> {
+    if session_name == "--help" || session_name == "-h" {
+        return Ok(CliAction::Help);
+    }
+
+    if !is_valid_session_name(&session_name) {
+        return Err(format!("invalid session name: {session_name}"));
+    }
+
+    let mut lines: u64 = 40;
+    let mut json = false;
+    while let Some(arg) = args.next() {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+        match arg.as_str() {
+            "--json" => json = true,
+            "--lines" => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| "--lines requires a value".to_string())?
+                    .into_string()
+                    .map_err(|_| "--lines value must be valid UTF-8".to_string())?;
+                lines = raw
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid --lines value: {raw}"))?;
+                if lines == 0 {
+                    return Err("--lines must be greater than zero".to_string());
+                }
+            }
+            other => return Err(format!("unexpected argument for show: {other}")),
+        }
+    }
+
+    Ok(CliAction::Show(ShowCli {
+        session_name,
+        lines,
+        json,
     }))
 }
 
@@ -663,6 +885,65 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     Ok(None)
 }
 
+/// Derive a session's state from its log marker, falling back to tmux liveness.
+/// Liveness is injected so unit tests can avoid shelling out to tmux.
+fn session_state(log_path: &Path, alive: impl FnOnce() -> bool) -> Result<SessionState, String> {
+    if let Some(status) = read_done_marker(log_path)? {
+        return Ok(SessionState::Done(status));
+    }
+    if alive() {
+        Ok(SessionState::Running)
+    } else {
+        Ok(SessionState::Ended)
+    }
+}
+
+/// The last `max_lines` lines of `log_path`, reading at most `LOG_TAIL_BYTES`
+/// from the end of the file. A trailing partial line (no final newline) is kept
+/// as a line for display, unlike marker detection which ignores it. When the
+/// read starts mid-line because the log exceeds `LOG_TAIL_BYTES`, that leading
+/// fragment is dropped so only complete lines are shown.
+fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
+    let mut file = fs::File::open(log_path)
+        .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
+
+    let len = file
+        .metadata()
+        .map_err(|err| format!("failed to stat {}: {err}", log_path.display()))?
+        .len();
+    let mut truncated = false;
+    if len > LOG_TAIL_BYTES {
+        file.seek(SeekFrom::Start(len - LOG_TAIL_BYTES))
+            .map_err(|err| format!("failed to seek {}: {err}", log_path.display()))?;
+        truncated = true;
+    }
+
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)
+        .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
+
+    let text = String::from_utf8_lossy(&tail);
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    // The read started mid-line, so the first element is a fragment of a
+    // line cut by the seek; drop it so only complete lines are shown.
+    if truncated && !lines.is_empty() {
+        lines.remove(0);
+    }
+
+    let start = lines.len().saturating_sub(max_lines as usize);
+    Ok(lines[start..]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect())
+}
+
 fn unique_suffix() -> String {
     let pid = process::id();
     let nanos = SystemTime::now()
@@ -743,6 +1024,33 @@ fn shell_quote(value: &str) -> String {
 
 fn shell_quote_path(path: &Path) -> String {
     String::from_utf8_lossy(&quote_bytes(path.as_os_str().as_bytes())).into_owned()
+}
+
+/// Escape a string for a JSON string literal: `"`, `\\`, and control characters
+/// below 0x20 (named escapes for the common ones, `\u00XX` for the rest).
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => escaped.push_str(&format!("\\u{:04X}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn json_status(status: Option<u8>) -> String {
+    match status {
+        Some(status) => status.to_string(),
+        None => "null".to_string(),
+    }
 }
 
 fn run_skill(cli: &SkillCli) -> Result<i32, String> {
@@ -1097,6 +1405,44 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_task_named_list() {
+        let CliAction::Run(cli) =
+            parse_args(["list", "--", "true"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected run action");
+        };
+
+        assert_eq!(cli.task_name, "list");
+    }
+
+    #[test]
+    fn keeps_a_task_named_show() {
+        let CliAction::Run(cli) =
+            parse_args(["show", "--", "true"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected run action");
+        };
+
+        assert_eq!(cli.task_name, "show");
+    }
+
+    #[test]
+    fn list_flag_and_show_session_still_parse_alongside_task_fallback() {
+        assert_eq!(
+            parse_args(["list", "--json"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::List(ListCli { json: true })
+        );
+
+        let CliAction::Show(show) =
+            parse_args(["show", "build_1-2"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected show action");
+        };
+        assert_eq!(show.session_name, "build_1-2");
+        assert_eq!(show.lines, 40);
+    }
+
+    #[test]
     fn rejects_invalid_wait_arguments() {
         assert!(parse_args(["wait"].into_iter().map(OsString::from)).is_err());
         assert!(parse_args(["wait", "../evil"].into_iter().map(OsString::from)).is_err());
@@ -1384,6 +1730,8 @@ mod tests {
             ("fish", COMPLETION_FISH),
         ] {
             for token in [
+                "list",
+                "show",
                 "wait",
                 "skill",
                 "completion",
@@ -1396,6 +1744,22 @@ mod tests {
                     "{label} script must contain `{token}`"
                 );
             }
+        }
+
+        // bash and zsh spell flags literally; fish spells them `-l <flag>`.
+        for (label, script) in [("bash", COMPLETION_BASH), ("zsh", COMPLETION_ZSH)] {
+            for token in ["--json", "--lines"] {
+                assert!(
+                    script.contains(token),
+                    "{label} script must contain `{token}`"
+                );
+            }
+        }
+        for token in ["-l json", "-l lines"] {
+            assert!(
+                COMPLETION_FISH.contains(token),
+                "fish script must contain `{token}`"
+            );
         }
     }
 
@@ -1504,6 +1868,186 @@ mod tests {
             poll_until_done(&log, || true, None).unwrap(),
             WaitOutcome::Completed(0)
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parses_list_subcommand() {
+        assert_eq!(
+            parse_args(["list"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::List(ListCli { json: false })
+        );
+        assert_eq!(
+            parse_args(["list", "--json"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::List(ListCli { json: true })
+        );
+        assert_eq!(
+            parse_args(["list", "--help"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Help
+        );
+        assert_eq!(
+            parse_args(["list", "-h"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Help
+        );
+        assert!(parse_args(["list", "--bogus"].into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn parses_show_subcommand() {
+        let CliAction::Show(show) =
+            parse_args(["show", "build_1-2"].into_iter().map(OsString::from)).unwrap()
+        else {
+            panic!("expected show action");
+        };
+        assert_eq!(show.session_name, "build_1-2");
+        assert_eq!(show.lines, 40);
+        assert!(!show.json);
+
+        let CliAction::Show(show) = parse_args(
+            ["show", "build_1-2", "--lines", "5"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap() else {
+            panic!("expected show action");
+        };
+        assert_eq!(show.lines, 5);
+        assert!(!show.json);
+
+        let CliAction::Show(show) = parse_args(
+            ["show", "build_1-2", "--json"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .unwrap() else {
+            panic!("expected show action");
+        };
+        assert!(show.json);
+
+        assert!(
+            parse_args(
+                ["show", "build", "--lines", "0"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_args(
+                ["show", "build", "--lines", "x"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(parse_args(["show", "build", "extra"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(["show", "../evil"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(["show"].into_iter().map(OsString::from)).is_err());
+        assert_eq!(
+            parse_args(["show", "--help"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Help
+        );
+    }
+
+    #[test]
+    fn json_string_escapes_quotes_backslashes_and_control_chars() {
+        assert_eq!(json_string(""), "\"\"");
+        assert_eq!(json_string("plain"), "\"plain\"");
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string("a\rb"), "\"a\\rb\"");
+        assert_eq!(json_string("a\tb"), "\"a\\tb\"");
+        assert_eq!(json_string("\u{1}"), "\"\\u0001\"");
+        assert_eq!(json_string("\u{1f}"), "\"\\u001F\"");
+        assert_eq!(json_string("café"), "\"café\"");
+    }
+
+    #[test]
+    fn derives_session_state_from_marker_and_liveness() {
+        let dir = test_dir("state");
+        let log = dir.join("output.log");
+
+        // No marker yet: liveness decides.
+        assert_eq!(session_state(&log, || true).unwrap(), SessionState::Running);
+        assert_eq!(session_state(&log, || false).unwrap(), SessionState::Ended);
+
+        fs::write(&log, "working\n").unwrap();
+        assert_eq!(session_state(&log, || true).unwrap(), SessionState::Running);
+        assert_eq!(session_state(&log, || false).unwrap(), SessionState::Ended);
+
+        // A marker wins regardless of liveness.
+        fs::write(&log, "done\n__DONE__:7\n").unwrap();
+        assert_eq!(
+            session_state(&log, || false).unwrap(),
+            SessionState::Done(7)
+        );
+
+        fs::write(&log, "__DONE__:oops\n").unwrap();
+        assert!(session_state(&log, || false).is_err());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_keeps_last_lines_and_trailing_partial_line() {
+        let dir = test_dir("tail");
+        let log = dir.join("output.log");
+
+        fs::write(&log, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(
+            tail_lines(&log, 2).unwrap(),
+            vec!["two".to_string(), "three".to_string()]
+        );
+
+        // A trailing partial line (no final newline) is kept for display.
+        fs::write(&log, "one\ntwo").unwrap();
+        assert_eq!(
+            tail_lines(&log, 2).unwrap(),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(tail_lines(&log, 1).unwrap(), vec!["two".to_string()]);
+
+        fs::write(&log, "a\nb\nc\nd\n").unwrap();
+        assert_eq!(
+            tail_lines(&log, 3).unwrap(),
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+
+        fs::write(&log, "").unwrap();
+        assert_eq!(tail_lines(&log, 5).unwrap(), Vec::<String>::new());
+
+        fs::write(&log, "\n").unwrap();
+        assert_eq!(tail_lines(&log, 5).unwrap(), vec!["".to_string()]);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_drops_leading_fragment_when_log_exceeds_tail_window() {
+        let dir = test_dir("tail-truncate");
+        let log = dir.join("output.log");
+
+        // 20 lines of 999 'a's plus a newline each (~20000 bytes) exceed
+        // LOG_TAIL_BYTES (8 KiB), so the seek lands mid-line.
+        let line = "a".repeat(999);
+        let mut contents = String::new();
+        for _ in 0..20 {
+            contents.push_str(&line);
+            contents.push('\n');
+        }
+        fs::write(&log, &contents).unwrap();
+
+        let lines = tail_lines(&log, 5).unwrap();
+        assert_eq!(lines.len(), 5);
+        for returned in &lines {
+            assert_eq!(
+                returned.len(),
+                999,
+                "expected a complete line, not a seek fragment: {returned:?}"
+            );
+        }
 
         fs::remove_dir_all(dir).unwrap();
     }

@@ -260,6 +260,116 @@ fn wait_reports_status_when_output_lacks_trailing_newline() {
 }
 
 #[test]
+fn list_and_show_report_a_finished_task() {
+    let _tmux_guard = TMUX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(state_dir) = prepare_state_dir() else {
+        return;
+    };
+    let socket_dir = prepare_socket_dir();
+    let bin = env!("CARGO_BIN_EXE_tmux-run");
+
+    let start = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
+        .args([
+            "cli-e2e-ls",
+            "--",
+            "bash",
+            "-c",
+            "printf 'hello\\nworld\\n'; exit 3",
+        ])
+        .output()
+        .expect("failed to run tmux-run");
+
+    assert!(
+        start.status.success(),
+        "tmux-run start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    let session = session_name_from(&start.stdout);
+
+    let wait = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
+        .args(["wait", &session, "--timeout", "30"])
+        .output()
+        .expect("failed to run tmux-run wait");
+
+    let wait_stdout = String::from_utf8_lossy(&wait.stdout);
+    let wait_stderr = String::from_utf8_lossy(&wait.stderr);
+    assert_eq!(
+        wait.status.code(),
+        Some(3),
+        "expected wait to exit with recorded status 3; stdout: {wait_stdout}; stderr: {wait_stderr}; state: {}{}",
+        state_dir.display(),
+        wait_failure_diagnostics(&start, &state_dir, &socket_dir)
+    );
+
+    let list = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
+        .arg("list")
+        .output()
+        .expect("failed to run tmux-run list");
+    assert!(
+        list.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_out.contains(&format!("{session}\tdone 3\t")),
+        "expected `{session}\\tdone 3\\t` in list output: {list_out}"
+    );
+
+    let list_json = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
+        .args(["list", "--json"])
+        .output()
+        .expect("failed to run tmux-run list --json");
+    assert!(list_json.status.success());
+    let list_json_out = String::from_utf8_lossy(&list_json.stdout);
+    assert!(
+        list_json_out.contains(&format!("\"session\":\"{session}\"")),
+        "expected session in JSON list output: {list_json_out}"
+    );
+    assert!(
+        list_json_out.contains("\"state\":\"done\"") && list_json_out.contains("\"status\":3"),
+        "expected done state with status 3 in JSON list output: {list_json_out}"
+    );
+
+    let show = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("TMUX_TMPDIR", &socket_dir)
+        .args(["show", &session])
+        .output()
+        .expect("failed to run tmux-run show");
+    assert!(
+        show.status.success(),
+        "show failed: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let show_out = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        show_out.contains("status: done 3"),
+        "expected `status: done 3` in show output: {show_out}"
+    );
+    assert!(show_out.contains("hello"), "show output: {show_out}");
+    assert!(show_out.contains("world"), "show output: {show_out}");
+
+    let _ = Command::new("tmux")
+        .env("TMUX_TMPDIR", &socket_dir)
+        .args(["kill-session", "-t", &session])
+        .output();
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[test]
 fn unique_suffix_is_unique_across_threads() {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
