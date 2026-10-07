@@ -4,7 +4,14 @@
 [![crates.io](https://img.shields.io/crates/v/tmux-run)](https://crates.io/crates/tmux-run)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](https://github.com/mhalder/tmux-run#license)
 
-`tmux-run` starts a command in a detached tmux session, writes its combined stdout and stderr to a log file, and appends a `__DONE__:<status>` completion marker when the command exits. Starting returns immediately; `tmux-run wait` blocks on the same session later and exits with the recorded status. It is a small, dependency-free wrapper around the usual hand-written tmux-and-logging boilerplate, designed for predictable behaviour rather than session management.
+`tmux-run` is a small, dependency-free wrapper around the usual hand-written tmux-and-logging boilerplate.
+
+- Starts a command in a detached tmux session.
+- Writes combined stdout and stderr to a log file.
+- Appends a `__DONE__:<status>` completion marker when the command exits.
+- Starting returns immediately; `tmux-run wait` blocks on the same session later and exits with the recorded status.
+
+It optimizes for predictable behaviour rather than session management.
 
 ## Requirements
 
@@ -18,12 +25,6 @@
 cargo install tmux-run
 ```
 
-To install the latest unreleased `main` instead:
-
-```sh
-cargo install --git https://github.com/mhalder/tmux-run
-```
-
 Prebuilt binaries are published on [GitHub Releases](https://github.com/mhalder/tmux-run/releases) for:
 
 - Linux x86_64 and aarch64, static musl builds
@@ -34,6 +35,8 @@ Prebuilt binaries are published on [GitHub Releases](https://github.com/mhalder/
 ```text
 tmux-run <task-name> -- <command> [args...]
 tmux-run wait <session-name> [--timeout <seconds>]
+tmux-run list [--json]
+tmux-run show <session-name> [--lines N] [--json]
 tmux-run skill [--install [DIR]] [--check [DIR]]
 tmux-run completion <bash|zsh|fish> [--install] [--check]
 tmux-run --help | -h
@@ -58,10 +61,34 @@ tmux-run wait build_1234-5678 --timeout 600
 | 0 | ok |
 | 1 | a `--check` found the file missing or stale |
 | 2 | usage error |
-| 3 | `wait` found the session ended with no marker |
+| 3 | `wait` found the session ended with no marker; `show` found no log for the session |
 | 124 | `wait` timed out |
 
 When `wait` finds the marker it exits with the command's recorded exit status rather than one of the codes above.
+
+## List and show
+
+`tmux-run list` inventories every task whose state directory exists, sorted by session name: running now, done with a recorded status, or ended without a marker. Each line is tab-separated:
+
+```text
+<session-name>	<state>	<log-path>
+```
+
+`<state>` is `running`, `done <n>`, or `ended`: a task is `done <n>` when the log's `__DONE__:<n>` marker is present, `running` when its tmux session is alive, and `ended` otherwise. `--json` prints a JSON array of `{"session","state","status","log"}` objects; `status` is the recorded exit status for `done`, otherwise `null`.
+
+`tmux-run show <session-name>` prints the tail of a task's log without blocking, plus its state. `--lines N` defaults to 40.
+
+```text
+session: <session-name>
+status: <state>
+log:
+
+<last N log lines>
+```
+
+`--json` prints `{"session","state","status","log","lines"}`, where `lines` is an array of strings.
+
+Both commands are read-only. `list` exits 0 (including when there are no tasks) and `show` exits 0 whenever the log exists; both exit 2 on a usage error.
 
 ## Output and state
 

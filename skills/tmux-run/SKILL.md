@@ -58,6 +58,22 @@ tmux-run wait <session-name> --timeout 600
 
 `tmux-run wait` returns as soon as the marker lands and exits with the recorded status. `--timeout` bounds the wait and exits `124`; a session that ended without a marker exits `3`. Always pass an explicit `--timeout`. Never run `tail -f` on the log from a tool call; it does not return.
 
+To inventory tasks and their states, use:
+
+```sh
+tmux-run list
+```
+
+It prints one tab-separated line per task: session name, state (`running`, `done <n>`, or `ended`), and log path. `--json` prints the same as JSON objects with the recorded status where available.
+
+To read a task's tail and status without blocking or needing the log path, use:
+
+```sh
+tmux-run show <session-name>
+```
+
+It prints the session name, its state, and the last 40 log lines. `--lines N` changes the count; `--json` prints the same as JSON. `show` exits 3 when there is no log for that session name.
+
 Without waiting, a finished task's last log line is `__DONE__:<status>`, the command's exit status. Until it appears, the command is still running, or its session was killed before the command could exit, in which case no marker is written. Check the session directly:
 
 ```sh
