@@ -106,11 +106,11 @@ Use tmux-run instead when the result must outlive the session as a file. A Herdr
 The skill text is embedded in the binary. To refresh this file from the installed `tmux-run`, run:
 
 ```sh
-tmux-run skill --check <this skill's directory>
+tmux-run skill --check <this skill directory>
 ```
 
 and, if it reports missing or stale, run:
 
 ```sh
-tmux-run skill --install <this skill's directory>
+tmux-run skill --install <this skill directory>
 ```
