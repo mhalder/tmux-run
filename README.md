@@ -37,6 +37,8 @@ tmux-run <task-name> -- <command> [args...]
 tmux-run wait <session-name> [--timeout <seconds>]
 tmux-run list [--json]
 tmux-run show <session-name> [--lines N] [--json]
+tmux-run clean [--older-than <seconds>] [--dry-run]
+tmux-run rm <session-name> [--force]
 tmux-run skill [--install [DIR]] [--check [DIR]]
 tmux-run completion <bash|zsh|fish> [--install] [--check]
 tmux-run --help | -h
@@ -61,7 +63,7 @@ tmux-run wait build_1234-5678 --timeout 600
 | 0 | ok |
 | 1 | a `--check` found the file missing or stale |
 | 2 | usage error |
-| 3 | `wait` found the session ended with no marker; `show` found no log for the session |
+| 3 | `wait` found the session ended with no marker; `show` found no log for the session; `rm` found no state or a running task without `--force` |
 | 124 | `wait` timed out |
 
 When `wait` finds the marker it exits with the command's recorded exit status rather than one of the codes above.
@@ -90,6 +92,24 @@ log: <log-path>
 
 Both commands are read-only. `list` exits 0 (including when there are no tasks) and `show` exits 0 whenever the log exists; both exit 2 on a usage error.
 
+## Cleanup
+
+State is never removed automatically, so finished tasks accumulate under the state root. `tmux-run clean` removes the state directory of every finished task (state `done` or `ended`); a `running` task is always kept.
+
+```sh
+tmux-run clean --dry-run
+tmux-run clean --older-than 86400
+```
+
+`--dry-run` prints what would go without removing it. `--older-than <seconds>` limits removal to tasks whose log has not changed for that long. `clean` exits 0 even when there is nothing to remove.
+
+`tmux-run rm <session-name>` removes one task's state. A running task is refused with exit 3; pass `--force` to kill its tmux session first and then remove the state.
+
+```sh
+tmux-run rm build_1234-5678
+tmux-run rm build_1234-5678 --force
+```
+
 ## Output and state
 
 `tmux-run` starts the session and exits immediately; it does not wait for the command to finish. On startup it prints:
@@ -105,7 +125,7 @@ follow log: tail -f '<log-path>'
 
 The marker is appended to the log when the command exits, with the command's exit status.
 
-The task name is normalized for tmux (every character outside ASCII letters, digits, `-`, and `_` becomes `_`) and combined with the process id and a timestamp to make the session name unique. State lives in `tmux-run/<session>/` under `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory, holding `run.sh` and `output.log`. The command and its arguments are written into `run.sh` with argument boundaries preserved, rather than interpolated directly into the tmux command line. Nothing is deleted automatically.
+The task name is normalized for tmux (every character outside ASCII letters, digits, `-`, and `_` becomes `_`) and combined with the process id and a timestamp to make the session name unique. State lives in `tmux-run/<session>/` under `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory, holding `run.sh` and `output.log`. The command and its arguments are written into `run.sh` with argument boundaries preserved, rather than interpolated directly into the tmux command line. Nothing is removed until `tmux-run clean` or `tmux-run rm` deletes it.
 
 ## Agent skill
 

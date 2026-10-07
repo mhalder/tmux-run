@@ -1,13 +1,13 @@
 #compdef tmux-run
 
-# Subcommands: list show wait skill completion __complete
+# Subcommands: list show wait clean rm skill completion __complete
 # Top-level options: --help --version
 
 _tmux-run() {
     local -a sessions
 
     if (( CURRENT == 2 )); then
-        compadd -- list show wait skill completion __complete --help --version
+        compadd -- list show wait clean rm skill completion __complete --help --version
         return
     fi
 
@@ -31,6 +31,17 @@ _tmux-run() {
             sessions=("${(@f)$(tmux-run __complete sessions "${words[CURRENT]}" 2>/dev/null)}")
             compadd -a sessions
             ;;
+        clean)
+            if [[ "${words[CURRENT-1]}" == "--older-than" ]]; then
+                return
+            fi
+            compadd -- --older-than --dry-run
+            ;;
+        rm)
+            compadd -- --force
+            sessions=("${(@f)$(tmux-run __complete sessions "${words[CURRENT]}" 2>/dev/null)}")
+            compadd -a sessions
+            ;;
         skill)
             compadd -- --install --check
             ;;
@@ -45,7 +56,7 @@ _tmux-run() {
             compadd -- sessions
             ;;
         *)
-            compadd -- list show wait skill completion __complete --help --version
+            compadd -- list show wait clean rm skill completion __complete --help --version
             ;;
     esac
 }

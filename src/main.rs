@@ -23,6 +23,8 @@ const HELP: &str = "Usage: tmux-run <task-name> -- <command> [args...]
        tmux-run wait <session-name> [--timeout <seconds>]
        tmux-run list [--json]
        tmux-run show <session-name> [--lines <n>] [--json]
+       tmux-run clean [--older-than <seconds>] [--dry-run]
+       tmux-run rm <session-name> [--force]
        tmux-run skill [--install [DIR]] [--check [DIR]]
        tmux-run completion <bash|zsh|fish> [--install] [--check]
        tmux-run --help | -h
@@ -50,6 +52,15 @@ Show subcommand:
   tmux-run show <session-name> --lines <n>      Show the last <n> log lines (default 40)
   tmux-run show <session-name> --json           Print the session state and log tail as JSON
 
+Clean subcommand:
+  tmux-run clean                        Remove state for every finished task (done or ended)
+  tmux-run clean --older-than <secs>    Only remove finished tasks older than this
+  tmux-run clean --dry-run              Print what would be removed without removing it
+
+Rm subcommand:
+  tmux-run rm <session-name>            Remove one task's state (refuses a running task)
+  tmux-run rm <session-name> --force    Kill the task's tmux session, then remove its state
+
 Skill subcommand:
   tmux-run skill                    Print the embedded agent skill to stdout
   tmux-run skill --install [DIR]    Write DIR/SKILL.md (default ~/.agents/skills/tmux-run)
@@ -64,7 +75,8 @@ Completion subcommand:
 Exit status:
   <status>    status recorded in the completion marker (wait only)
   124         --timeout elapsed
-  3           session ended or never existed without a marker, or no log for a session (show)
+  3           session ended or never existed without a marker, or no log for a session (show);
+              rm found no state, or a running task without --force
   2           usage error
   1           --check found the installed file missing or stale
 
@@ -75,6 +87,9 @@ Examples:
   tmux-run list --json
   tmux-run show build_1234-5678
   tmux-run show build_1234-5678 --lines 20 --json
+  tmux-run clean --dry-run
+  tmux-run clean --older-than 86400
+  tmux-run rm build_1234-5678 --force
   tmux-run deploy -- bash -lc 'echo start; ./deploy.sh'
   tmux-run skill --install
   tmux-run completion bash --install
@@ -88,6 +103,8 @@ enum CliAction {
     Wait(WaitCli),
     List(ListCli),
     Show(ShowCli),
+    Clean(CleanCli),
+    Rm(RmCli),
     Skill(SkillCli),
     Completion(CompletionCli),
     CompleteSessions(Option<OsString>),
@@ -115,6 +132,18 @@ struct ShowCli {
     session_name: String,
     lines: u64,
     json: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CleanCli {
+    older_than: Option<Duration>,
+    dry_run: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RmCli {
+    session_name: String,
+    force: bool,
 }
 
 /// A task's current state as derived from its log marker and tmux liveness.
@@ -209,6 +238,8 @@ fn main() {
             eprintln!("       tmux-run wait <session-name> [--timeout <seconds>]");
             eprintln!("       tmux-run list [--json]");
             eprintln!("       tmux-run show <session-name> [--lines <n>] [--json]");
+            eprintln!("       tmux-run clean [--older-than <seconds>] [--dry-run]");
+            eprintln!("       tmux-run rm <session-name> [--force]");
             process::exit(2);
         }
     }
@@ -231,6 +262,8 @@ fn run() -> Result<i32, String> {
         CliAction::Wait(wait) => run_wait(&wait),
         CliAction::List(list) => run_list(&list),
         CliAction::Show(show) => run_show(&show),
+        CliAction::Clean(clean) => run_clean(&clean),
+        CliAction::Rm(rm) => run_rm(&rm),
         CliAction::Skill(skill) => run_skill(&skill),
         CliAction::Completion(completion) => run_completion(&completion),
         CliAction::CompleteSessions(prefix) => {
@@ -333,6 +366,108 @@ fn run_show(cli: &ShowCli) -> Result<i32, String> {
     Ok(0)
 }
 
+fn run_clean(cli: &CleanCli) -> Result<i32, String> {
+    clean_in(&state_root(), cli, SystemTime::now())
+}
+
+/// Remove state for every finished task under `root`. A running task is always
+/// kept, whatever `--older-than` says; use `rm --force` to stop and remove one.
+fn clean_in(root: &Path, cli: &CleanCli, now: SystemTime) -> Result<i32, String> {
+    for name in list_sessions_in(root, None) {
+        let dir = root.join(&name);
+        let log = dir.join("output.log");
+        let state = session_state(&log, || session_exists(&name))?;
+        if state == SessionState::Running {
+            continue;
+        }
+        if let Some(older_than) = cli.older_than
+            && !is_older_than(&log, older_than, now)
+        {
+            continue;
+        }
+
+        if cli.dry_run {
+            println!("would remove {name} ({})", state.human());
+            continue;
+        }
+
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => println!("removed {name} ({})", state.human()),
+            // Something else removed it first; the goal is met.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("failed to remove {}: {err}", dir.display())),
+        }
+    }
+
+    Ok(0)
+}
+
+fn run_rm(cli: &RmCli) -> Result<i32, String> {
+    remove_in(&state_root(), cli)
+}
+
+fn remove_in(root: &Path, cli: &RmCli) -> Result<i32, String> {
+    let name = &cli.session_name;
+    let dir = root.join(name);
+    // The directory is created before tmux starts, so it is the reliable
+    // existence check; `output.log` appears only once tmux opens the redirect.
+    if !dir.is_dir() {
+        eprintln!("error: no state for {name}");
+        return Ok(3);
+    }
+
+    let alive = session_exists(name);
+    if alive && !cli.force {
+        eprintln!("error: session {name} is running; pass --force to kill it and remove its state");
+        return Ok(3);
+    }
+
+    if alive {
+        kill_session(name)?;
+    }
+
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to remove {}: {err}", dir.display())),
+    }
+
+    if alive {
+        println!("removed {name} (killed running session)");
+    } else {
+        println!("removed {name}");
+    }
+    Ok(0)
+}
+
+fn kill_session(session_name: &str) -> Result<(), String> {
+    let output = Command::new("tmux")
+        .args(["kill-session", "-t"])
+        .arg(format!("={session_name}"))
+        .output()
+        .map_err(|err| format!("failed to run tmux: {err}"))?;
+
+    // Tolerate a race that ended the session first.
+    if output.status.success() || !session_exists(session_name) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "failed to kill session {session_name}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// True when `path`'s mtime is at least `age` in the past. A path that cannot
+/// be stat'd, or whose mtime is in the future, is not considered old.
+fn is_older_than(path: &Path, age: Duration, now: SystemTime) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|elapsed| elapsed >= age)
+}
+
 fn start_task(cli: &Cli) -> Result<(), String> {
     let paths = build_runtime_paths(&cli.task_name)
         .map_err(|err| format!("failed to prepare paths: {err}"))?;
@@ -406,6 +541,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
     }
     if first == "show" {
         return parse_show_subcommand(args);
+    }
+    if first == "clean" {
+        return parse_clean(args);
+    }
+    if first == "rm" {
+        return parse_rm_subcommand(args);
     }
     if first == "skill" {
         return parse_skill(args);
@@ -586,6 +727,94 @@ fn parse_show(
         session_name,
         lines,
         json,
+    }))
+}
+
+fn parse_clean(args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `clean -- <command>` still names a task literally called "clean".
+    let mut args = args.peekable();
+    if args
+        .peek()
+        .is_some_and(|arg| arg.as_os_str() == OsStr::new("--"))
+    {
+        args.next();
+        return parse_command("clean".to_string(), args);
+    }
+
+    let mut older_than: Option<Duration> = None;
+    let mut dry_run = false;
+
+    while let Some(arg) = args.next() {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+        match arg.as_str() {
+            "--older-than" => {
+                let raw = args
+                    .next()
+                    .ok_or_else(|| "--older-than requires a value in seconds".to_string())?
+                    .into_string()
+                    .map_err(|_| "--older-than value must be valid UTF-8".to_string())?;
+                let seconds: u64 = raw
+                    .parse()
+                    .map_err(|_| format!("invalid --older-than value: {raw}"))?;
+                if seconds == 0 {
+                    return Err("--older-than must be greater than zero".to_string());
+                }
+                older_than = Some(Duration::from_secs(seconds));
+            }
+            "--dry-run" => dry_run = true,
+            "--help" | "-h" => return Ok(CliAction::Help),
+            other => return Err(format!("unexpected argument for clean: {other}")),
+        }
+    }
+
+    Ok(CliAction::Clean(CleanCli {
+        older_than,
+        dry_run,
+    }))
+}
+
+fn parse_rm_subcommand(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    // `rm -- <command>` still names a task literally called "rm".
+    match args.next() {
+        Some(separator) if separator == "--" => parse_command("rm".to_string(), args),
+        Some(session) => {
+            let session_name = session
+                .into_string()
+                .map_err(|_| "session name must be valid UTF-8".to_string())?;
+            parse_rm(session_name, args)
+        }
+        None => Err("missing session name after `rm`".to_string()),
+    }
+}
+
+fn parse_rm(
+    session_name: String,
+    args: impl Iterator<Item = OsString>,
+) -> Result<CliAction, String> {
+    if session_name == "--help" || session_name == "-h" {
+        return Ok(CliAction::Help);
+    }
+
+    if !is_valid_session_name(&session_name) {
+        return Err(format!("invalid session name: {session_name}"));
+    }
+
+    let mut force = false;
+    for arg in args {
+        let arg = arg
+            .into_string()
+            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
+        match arg.as_str() {
+            "--force" => force = true,
+            other => return Err(format!("unexpected argument for rm: {other}")),
+        }
+    }
+
+    Ok(CliAction::Rm(RmCli {
+        session_name,
+        force,
     }))
 }
 
@@ -1733,6 +1962,8 @@ mod tests {
                 "list",
                 "show",
                 "wait",
+                "clean",
+                "rm",
                 "skill",
                 "completion",
                 "__complete",
@@ -1748,14 +1979,20 @@ mod tests {
 
         // bash and zsh spell flags literally; fish spells them `-l <flag>`.
         for (label, script) in [("bash", COMPLETION_BASH), ("zsh", COMPLETION_ZSH)] {
-            for token in ["--json", "--lines"] {
+            for token in ["--json", "--lines", "--older-than", "--dry-run", "--force"] {
                 assert!(
                     script.contains(token),
                     "{label} script must contain `{token}`"
                 );
             }
         }
-        for token in ["-l json", "-l lines"] {
+        for token in [
+            "-l json",
+            "-l lines",
+            "-l older-than",
+            "-l dry-run",
+            "-l force",
+        ] {
             assert!(
                 COMPLETION_FISH.contains(token),
                 "fish script must contain `{token}`"
@@ -1951,6 +2188,107 @@ mod tests {
     }
 
     #[test]
+    fn parses_clean_subcommand() {
+        assert_eq!(
+            parse_args(["clean"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Clean(CleanCli {
+                older_than: None,
+                dry_run: false,
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["clean", "--older-than", "60"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Clean(CleanCli {
+                older_than: Some(Duration::from_secs(60)),
+                dry_run: false,
+            })
+        );
+        assert_eq!(
+            parse_args(["clean", "--dry-run"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Clean(CleanCli {
+                older_than: None,
+                dry_run: true,
+            })
+        );
+        assert_eq!(
+            parse_args(["clean", "--help"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Help
+        );
+        assert!(
+            parse_args(
+                ["clean", "--older-than", "0"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(parse_args(["clean", "--older-than"].into_iter().map(OsString::from)).is_err());
+        assert!(
+            parse_args(
+                ["clean", "--older-than", "soon"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        assert!(parse_args(["clean", "--bogus"].into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn parses_rm_subcommand() {
+        assert_eq!(
+            parse_args(["rm", "build_1-2"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Rm(RmCli {
+                session_name: "build_1-2".to_string(),
+                force: false,
+            })
+        );
+        assert_eq!(
+            parse_args(
+                ["rm", "build_1-2", "--force"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .unwrap(),
+            CliAction::Rm(RmCli {
+                session_name: "build_1-2".to_string(),
+                force: true,
+            })
+        );
+        assert_eq!(
+            parse_args(["rm", "--help"].into_iter().map(OsString::from)).unwrap(),
+            CliAction::Help
+        );
+        assert!(parse_args(["rm"].into_iter().map(OsString::from)).is_err());
+        assert!(parse_args(["rm", "../evil"].into_iter().map(OsString::from)).is_err());
+        assert!(
+            parse_args(
+                ["rm", "build_1-2", "--bogus"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn keeps_tasks_named_clean_and_rm() {
+        for name in ["clean", "rm"] {
+            let CliAction::Run(cli) =
+                parse_args([name, "--", "true"].into_iter().map(OsString::from)).unwrap()
+            else {
+                panic!("expected run action for {name}");
+            };
+            assert_eq!(cli.task_name, name);
+        }
+    }
+
+    #[test]
     fn json_string_escapes_quotes_backslashes_and_control_chars() {
         assert_eq!(json_string(""), "\"\"");
         assert_eq!(json_string("plain"), "\"plain\"");
@@ -2048,6 +2386,118 @@ mod tests {
                 "expected a complete line, not a seek fragment: {returned:?}"
             );
         }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clean_removes_only_finished_sessions() {
+        let root = test_dir("clean");
+        let write = |name: &str, log: &str| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("output.log"), log).unwrap();
+        };
+        write("done_1-1", "ok\n__DONE__:0\n");
+        write("ended_2-2", "partial\n");
+
+        let dry = CleanCli {
+            older_than: None,
+            dry_run: true,
+        };
+        assert_eq!(clean_in(&root, &dry, SystemTime::now()).unwrap(), 0);
+        assert!(root.join("done_1-1").exists());
+        assert!(root.join("ended_2-2").exists());
+
+        let real = CleanCli {
+            older_than: None,
+            dry_run: false,
+        };
+        assert_eq!(clean_in(&root, &real, SystemTime::now()).unwrap(), 0);
+        assert!(!root.join("done_1-1").exists());
+        assert!(!root.join("ended_2-2").exists());
+
+        // Removing again is a no-op, not an error.
+        assert_eq!(clean_in(&root, &real, SystemTime::now()).unwrap(), 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_older_than_skips_recent_sessions() {
+        let root = test_dir("clean-age");
+        let dir = root.join("done_1-1");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("output.log"), "ok\n__DONE__:0\n").unwrap();
+
+        let cli = CleanCli {
+            older_than: Some(Duration::from_secs(3600)),
+            dry_run: false,
+        };
+        // Fresh mtime: too recent to remove.
+        assert_eq!(clean_in(&root, &cli, SystemTime::now()).unwrap(), 0);
+        assert!(dir.exists());
+
+        // An hour later the same session is old enough.
+        let later = SystemTime::now() + Duration::from_secs(3601);
+        assert_eq!(clean_in(&root, &cli, later).unwrap(), 0);
+        assert!(!dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rm_removes_state_and_reports_a_missing_session() {
+        let root = test_dir("rm");
+        // Unique name so no real tmux session can be mistaken for a running one.
+        let name = format!("rmtest_{}", unique_suffix());
+        let dir = root.join(&name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("output.log"), "ok\n__DONE__:0\n").unwrap();
+        fs::write(dir.join("run.sh"), "#!/usr/bin/env bash\n").unwrap();
+
+        let cli = RmCli {
+            session_name: name.clone(),
+            force: false,
+        };
+        assert_eq!(remove_in(&root, &cli).unwrap(), 0);
+        assert!(!dir.exists());
+
+        // A session with no state is exit 3, not a hard error.
+        assert_eq!(remove_in(&root, &cli).unwrap(), 3);
+
+        // A state directory whose log never appeared (tmux killed early) is
+        // still removable; the directory is created before tmux starts.
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("run.sh"), "#!/usr/bin/env bash\n").unwrap();
+        assert_eq!(remove_in(&root, &cli).unwrap(), 0);
+        assert!(!dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn is_older_than_compares_mtime() {
+        let dir = test_dir("age");
+        let log = dir.join("output.log");
+        fs::write(&log, "x").unwrap();
+
+        assert!(!is_older_than(
+            &log,
+            Duration::from_secs(60),
+            SystemTime::now()
+        ));
+        assert!(is_older_than(
+            &log,
+            Duration::from_secs(60),
+            SystemTime::now() + Duration::from_secs(61)
+        ));
+        // A path that cannot be stat'd is never old.
+        assert!(!is_older_than(
+            &dir.join("missing"),
+            Duration::from_secs(1),
+            SystemTime::now()
+        ));
 
         fs::remove_dir_all(dir).unwrap();
     }

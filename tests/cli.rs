@@ -370,6 +370,85 @@ fn list_and_show_report_a_finished_task() {
 }
 
 #[test]
+fn clean_and_rm_remove_finished_task_state() {
+    let _tmux_guard = TMUX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(state_dir) = prepare_state_dir() else {
+        return;
+    };
+    let socket_dir = prepare_socket_dir();
+    let bin = env!("CARGO_BIN_EXE_tmux-run");
+
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .env("XDG_STATE_HOME", &state_dir)
+            .env("TMUX_TMPDIR", &socket_dir)
+            .args(args)
+            .output()
+            .expect("failed to run tmux-run")
+    };
+    let state_session_dir = |session: &str| state_dir.join("tmux-run").join(session);
+
+    let start = run(&["cli-e2e-clean", "--", "bash", "-c", "exit 0"]);
+    assert!(
+        start.status.success(),
+        "tmux-run start failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let session = session_name_from(&start.stdout);
+
+    let wait = run(&["wait", &session, "--timeout", "30"]);
+    assert_eq!(
+        wait.status.code(),
+        Some(0),
+        "expected wait to exit 0; stderr: {}",
+        String::from_utf8_lossy(&wait.stderr)
+    );
+    assert!(state_session_dir(&session).exists());
+
+    let dry = run(&["clean", "--dry-run"]);
+    assert!(dry.status.success());
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).contains("would remove"),
+        "expected dry-run to report what it would remove: {}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+    assert!(state_session_dir(&session).exists());
+
+    let clean = run(&["clean"]);
+    assert!(clean.status.success());
+    assert!(
+        !state_session_dir(&session).exists(),
+        "clean should have removed {}",
+        state_session_dir(&session).display()
+    );
+
+    // A second task exercises the single-session form.
+    let start = run(&["cli-e2e-rm", "--", "bash", "-c", "exit 0"]);
+    assert!(start.status.success());
+    let session = session_name_from(&start.stdout);
+    assert_eq!(
+        run(&["wait", &session, "--timeout", "30"]).status.code(),
+        Some(0)
+    );
+
+    let rm = run(&["rm", &session]);
+    assert!(
+        rm.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&rm.stderr)
+    );
+    assert!(!state_session_dir(&session).exists());
+
+    // Removing a session whose state is gone is exit 3, not a crash.
+    assert_eq!(run(&["rm", &session]).status.code(), Some(3));
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+#[test]
 fn unique_suffix_is_unique_across_threads() {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
