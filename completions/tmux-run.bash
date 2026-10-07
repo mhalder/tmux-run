@@ -1,5 +1,5 @@
 # bash completion for tmux-run
-# Subcommands: list show wait skill completion __complete
+# Subcommands: list show wait clean rm skill completion __complete
 # Top-level options: --help --version
 
 _tmux_run() {
@@ -7,7 +7,7 @@ _tmux_run() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="list show wait skill completion __complete"
+    local subcommands="list show wait clean rm skill completion __complete"
     local top_options="--help --version"
     local skill_options="--install --check"
     local completion_options="--install --check"
@@ -16,7 +16,7 @@ _tmux_run() {
     local i cmd=""
     for ((i = 1; i < COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
-            list|show|wait|skill|completion|__complete)
+            list|show|wait|clean|rm|skill|completion|__complete)
                 cmd="${COMP_WORDS[i]}"
                 ;;
         esac
@@ -43,6 +43,18 @@ _tmux_run() {
             local sessions
             sessions="$(tmux-run __complete sessions "$cur" 2>/dev/null)"
             COMPREPLY=( $(compgen -W "--timeout $sessions" -- "$cur") )
+            ;;
+        clean)
+            if [[ "$prev" == "--older-than" ]]; then
+                COMPREPLY=()
+                return
+            fi
+            COMPREPLY=( $(compgen -W "--older-than --dry-run" -- "$cur") )
+            ;;
+        rm)
+            local sessions
+            sessions="$(tmux-run __complete sessions "$cur" 2>/dev/null)"
+            COMPREPLY=( $(compgen -W "--force $sessions" -- "$cur") )
             ;;
         skill)
             COMPREPLY=( $(compgen -W "$skill_options" -- "$cur") )

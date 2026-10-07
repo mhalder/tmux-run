@@ -1,11 +1,13 @@
 # tmux-run completions for fish
-# Subcommands: list show wait skill completion __complete
+# Subcommands: list show wait clean rm skill completion __complete
 # Top-level options: --help --version
-# Subcommand flags: --json --lines
+# Subcommand flags: --json --lines --older-than --dry-run --force
 
 complete -c tmux-run -n '__fish_use_subcommand' -a list -d 'List all sessions and their state' -f
 complete -c tmux-run -n '__fish_use_subcommand' -a show -d 'Show a session and the tail of its log' -f
 complete -c tmux-run -n '__fish_use_subcommand' -a wait -d 'Wait for a running task' -f
+complete -c tmux-run -n '__fish_use_subcommand' -a clean -d 'Remove state for finished tasks' -f
+complete -c tmux-run -n '__fish_use_subcommand' -a rm -d 'Remove one task and its state' -f
 complete -c tmux-run -n '__fish_use_subcommand' -a skill -d 'Print or manage the agent skill' -f
 complete -c tmux-run -n '__fish_use_subcommand' -a completion -d 'Print or install shell completions' -f
 complete -c tmux-run -n '__fish_use_subcommand' -a __complete -d 'Internal completion helper' -f
@@ -20,6 +22,12 @@ complete -c tmux-run -n '__fish_seen_subcommand_from list' -l json -d 'Print the
 complete -c tmux-run -n '__fish_seen_subcommand_from show' -l lines -r -d 'Show the last N log lines' -f
 complete -c tmux-run -n '__fish_seen_subcommand_from show' -l json -d 'Print as JSON' -f
 complete -c tmux-run -n '__fish_seen_subcommand_from show' -a '(tmux-run __complete sessions (commandline -ct))' -d 'Session name' -f
+
+complete -c tmux-run -n '__fish_seen_subcommand_from clean' -l older-than -r -d 'Only remove tasks older than this many seconds' -f
+complete -c tmux-run -n '__fish_seen_subcommand_from clean' -l dry-run -d 'Print what would be removed' -f
+
+complete -c tmux-run -n '__fish_seen_subcommand_from rm' -l force -d 'Kill a running session first' -f
+complete -c tmux-run -n '__fish_seen_subcommand_from rm' -a '(tmux-run __complete sessions (commandline -ct))' -d 'Session name' -f
 
 complete -c tmux-run -n '__fish_seen_subcommand_from skill; and not __fish_seen_subcommand_from --install --check' -a '--install' -d 'Install the skill' -f
 complete -c tmux-run -n '__fish_seen_subcommand_from skill; and not __fish_seen_subcommand_from --install --check' -a '--check' -d 'Check the installed skill' -f

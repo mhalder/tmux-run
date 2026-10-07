@@ -37,7 +37,7 @@ follow log: tail -f '<log-path>'
 Report the session name, log path, and `tmux-run wait` command to the user when starting a background task.
 
 - The session name is the task name with every character other than ASCII letters, digits, `-`, and `_` replaced by `_`, followed by the process id and a timestamp, so every run gets a new session. Use the printed name; never reconstruct it.
-- The log is `output.log` in a `<session-name>` directory under `tmux-run/` in `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory, next to the generated `run.sh`. tmux-run never deletes either.
+- The log is `output.log` in a `<session-name>` directory under `tmux-run/` in `$XDG_STATE_HOME`, then `~/.local/state`, then the system temp directory, next to the generated `run.sh`. Nothing is deleted until you remove it with `tmux-run clean` or `tmux-run rm`.
 - A usage error (no task name, no `--`, or nothing after it; no session name, a session name that is not one tmux-run printed, or a bad `--timeout`) prints `error: ...` and exits 2 without starting or waiting on anything.
 
 ## Monitor and finish
@@ -80,11 +80,13 @@ Without waiting, a finished task's last log line is `__DONE__:<status>`, the com
 tmux has-session -t "=<session-name>" 2>/dev/null && echo active || echo ended
 ```
 
-If a completed session is still present, close only that session:
+If a completed session is still present and its state is no longer needed, remove it with tmux-run rather than a bare `tmux kill-session`:
 
 ```sh
-tmux kill-session -t <session-name>
+tmux-run rm <session-name>
 ```
+
+`rm` refuses a running task; pass `--force` to kill its tmux session and remove its state in one step. To sweep every finished task's state, run `tmux-run clean` (add `--dry-run` first to see what it would remove).
 
 Do not leave idle shells, completed sessions, or `tail -f` panes running.
 
