@@ -68,7 +68,7 @@ When `wait` finds the marker it exits with the command's recorded exit status ra
 
 ## List and show
 
-`tmux-run list` inventories every task whose state directory exists, sorted by session name: running now, done with a recorded status, or ended without a marker. Each line is tab-separated:
+`tmux-run list` inventories every task with a log, sorted by session name: running now, done with a recorded status, or ended without a marker. Each line is tab-separated:
 
 ```text
 <session-name>	<state>	<log-path>
@@ -81,7 +81,7 @@ When `wait` finds the marker it exits with the command's recorded exit status ra
 ```text
 session: <session-name>
 status: <state>
-log:
+log: <log-path>
 
 <last N log lines>
 ```
