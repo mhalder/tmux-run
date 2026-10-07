@@ -1,5 +1,5 @@
 # bash completion for tmux-run
-# Subcommands: wait skill completion __complete
+# Subcommands: list show wait skill completion __complete
 # Top-level options: --help --version
 
 _tmux_run() {
@@ -7,7 +7,7 @@ _tmux_run() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local subcommands="wait skill completion __complete"
+    local subcommands="list show wait skill completion __complete"
     local top_options="--help --version"
     local skill_options="--install --check"
     local completion_options="--install --check"
@@ -16,13 +16,25 @@ _tmux_run() {
     local i cmd=""
     for ((i = 1; i < COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
-            wait|skill|completion|__complete)
+            list|show|wait|skill|completion|__complete)
                 cmd="${COMP_WORDS[i]}"
                 ;;
         esac
     done
 
     case "$cmd" in
+        list)
+            COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+            ;;
+        show)
+            if [[ "$prev" == "--lines" ]]; then
+                COMPREPLY=()
+                return
+            fi
+            local sessions
+            sessions="$(tmux-run __complete sessions "$cur" 2>/dev/null)"
+            COMPREPLY=( $(compgen -W "--lines --json $sessions" -- "$cur") )
+            ;;
         wait)
             if [[ "$prev" == "--timeout" ]]; then
                 COMPREPLY=()
