@@ -72,7 +72,7 @@ To read a task's tail and status without blocking or needing the log path, use:
 tmux-run show <session-name>
 ```
 
-It prints the session name, its state, and the last 40 log lines. `--lines N` changes the count; `--json` prints the same as JSON. `show` exits 3 when there is no log for that session name.
+It prints the session name, its state, the log path, and the last 40 log lines. `--lines N` changes the count; `--json` prints the same as JSON. `show` exits 3 when there is no log for that session name.
 
 Without waiting, a finished task's last log line is `__DONE__:<status>`, the command's exit status. Until it appears, the command is still running, or its session was killed before the command could exit, in which case no marker is written. Check the session directly:
 
