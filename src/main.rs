@@ -1156,11 +1156,13 @@ fn session_state(log_path: &Path, alive: impl FnOnce() -> bool) -> Result<Sessio
     }
 }
 
-/// The last `max_lines` lines of `log_path`, reading at most `LOG_TAIL_BYTES`
-/// from the end of the file. A trailing partial line (no final newline) is kept
-/// as a line for display, unlike marker detection which ignores it. When the
-/// read starts mid-line because the log exceeds `LOG_TAIL_BYTES`, that leading
-/// fragment is dropped so only complete lines are shown.
+/// The last `max_lines` lines of `log_path`. The read window starts at
+/// `LOG_TAIL_BYTES` and grows until it holds `max_lines` complete lines or the
+/// whole file, so `--lines N` is not silently capped by the window. A trailing
+/// partial line (no final newline) is kept as a line for display, unlike marker
+/// detection which ignores it. When the window starts mid-line because the log
+/// exceeds the window, that leading fragment is dropped so only complete lines
+/// are shown.
 fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
     let mut file = fs::File::open(log_path)
         .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
@@ -1169,37 +1171,48 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
         .metadata()
         .map_err(|err| format!("failed to stat {}: {err}", log_path.display()))?
         .len();
-    let mut truncated = false;
-    if len > LOG_TAIL_BYTES {
-        file.seek(SeekFrom::Start(len - LOG_TAIL_BYTES))
+
+    let mut window = LOG_TAIL_BYTES.min(len);
+    loop {
+        file.seek(SeekFrom::Start(len - window))
             .map_err(|err| format!("failed to seek {}: {err}", log_path.display()))?;
-        truncated = true;
-    }
 
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail)
-        .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail)
+            .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
 
-    let text = String::from_utf8_lossy(&tail);
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
+        let text = String::from_utf8_lossy(&tail);
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
 
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    // The read started mid-line, so the first element is a fragment of a
-    // line cut by the seek; drop it so only complete lines are shown.
-    if truncated && !lines.is_empty() {
-        lines.remove(0);
-    }
+        let mut lines: Vec<&str> = text.split('\n').collect();
+        if text.ends_with('\n') {
+            lines.pop();
+        }
+        // The window started mid-line, so the first element is a fragment of a
+        // line cut by the seek; drop it so only complete lines are shown.
+        if window < len && !lines.is_empty() {
+            lines.remove(0);
+        }
+        // A trailing partial line is kept for display but is not a complete
+        // line, so it does not count toward the window being big enough.
+        let complete_lines = if text.ends_with('\n') {
+            lines.len()
+        } else {
+            lines.len().saturating_sub(1)
+        };
 
-    let start = lines.len().saturating_sub(max_lines as usize);
-    Ok(lines[start..]
-        .iter()
-        .map(|line| (*line).to_string())
-        .collect())
+        if window == len || complete_lines >= max_lines as usize {
+            let start = lines.len().saturating_sub(max_lines as usize);
+            return Ok(lines[start..]
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect());
+        }
+
+        window = window.saturating_mul(2).min(len);
+    }
 }
 
 fn unique_suffix() -> String {
@@ -2430,6 +2443,27 @@ mod tests {
                 "expected a complete line, not a seek fragment: {returned:?}"
             );
         }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_reads_beyond_the_tail_window() {
+        let dir = test_dir("tail-large");
+        let log = dir.join("output.log");
+
+        // 2000 lines are more than LOG_TAIL_BYTES (8 KiB), so reading the
+        // whole requested 1500 lines needs a window larger than one read.
+        let mut contents = String::new();
+        for n in 0..2000 {
+            contents.push_str(&format!("line {n}\n"));
+        }
+        fs::write(&log, &contents).unwrap();
+
+        let lines = tail_lines(&log, 1500).unwrap();
+        assert_eq!(lines.len(), 1500);
+        assert_eq!(lines[0], "line 500");
+        assert_eq!(lines[1499], "line 1999");
 
         fs::remove_dir_all(dir).unwrap();
     }
