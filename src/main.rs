@@ -1082,7 +1082,8 @@ fn session_exists(session_name: &str) -> bool {
 /// onto the end of it when the command's output had no trailing newline
 /// (`no trailing newline__DONE__:0`). A complete line that starts with the
 /// reserved prefix but whose remainder is not a `u8` status is the command's
-/// own output, not a marker: it reads as no marker rather than an error. A
+/// own output, or a late writer that inherited the log fd; it is skipped so an
+/// earlier real marker is still found, and it never fails the wrapper. A
 /// trailing partial line is ignored so a torn read is a retry rather than a
 /// wrong status.
 fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
@@ -1119,17 +1120,9 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     // of output that did not end with a newline.
     if let Some(last_line) = text.lines().next_back() {
         let line = last_line.trim_end_matches('\r');
-        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                return Ok(None);
-            }
-            // A complete line starting with the reserved prefix but without a
-            // numeric status is the command's own output, not a marker; treat
-            // it as no marker rather than failing the wrapper.
-            let Ok(status) = rest.parse::<u8>() else {
-                return Ok(None);
-            };
+        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX)
+            && let Ok(status) = rest.trim().parse::<u8>()
+        {
             return Ok(Some(status));
         }
         if let Some(at) = line.rfind(DONE_MARKER_PREFIX) {
@@ -1143,17 +1136,9 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     }
 
     for line in text.lines().rev() {
-        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                return Ok(None);
-            }
-            // As above: a reserved-prefix line without a numeric status is the
-            // command's own output. Do not scan earlier lines past it — a real
-            // marker would have been appended after this output.
-            let Ok(status) = rest.parse::<u8>() else {
-                return Ok(None);
-            };
+        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX)
+            && let Ok(status) = rest.trim().parse::<u8>()
+        {
             return Ok(Some(status));
         }
     }
@@ -2162,6 +2147,22 @@ mod tests {
         assert_eq!(read_done_marker(&log).unwrap(), None);
         fs::write(&log, "note __DONE__:x\n").unwrap();
         assert_eq!(read_done_marker(&log).unwrap(), None);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn late_output_does_not_hide_an_earlier_marker() {
+        let dir = test_dir("marker-late");
+        let log = dir.join("output.log");
+
+        // A daemonized child that inherited the log fd can write a
+        // reserved-prefix line after the real marker; it must not hide the
+        // marker written earlier.
+        fs::write(&log, "done\n__DONE__:0\n__DONE__:oops\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(0));
+        fs::write(&log, "done\n__DONE__:7\n__DONE__:\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(7));
 
         fs::remove_dir_all(dir).unwrap();
     }
