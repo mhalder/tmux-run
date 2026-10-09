@@ -1187,6 +1187,10 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
         .map_err(|err| format!("failed to stat {}: {err}", log_path.display()))?
         .len();
 
+    // `usize` is narrower than `u64` on 32-bit targets; clamp before the cast
+    // so a huge `--lines` value means "every line" instead of wrapping.
+    let max_lines = usize::try_from(max_lines).unwrap_or(usize::MAX);
+
     let mut window = LOG_TAIL_BYTES.min(len);
     loop {
         file.seek(SeekFrom::Start(len - window))
@@ -1218,8 +1222,8 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
             lines.len().saturating_sub(1)
         };
 
-        if window == len || complete_lines >= max_lines as usize {
-            let start = lines.len().saturating_sub(max_lines as usize);
+        if window == len || complete_lines >= max_lines {
+            let start = lines.len().saturating_sub(max_lines);
             return Ok(lines[start..]
                 .iter()
                 .map(|line| (*line).to_string())
@@ -2524,6 +2528,22 @@ mod tests {
         assert_eq!(lines.len(), 1500);
         assert_eq!(lines[0], "line 500");
         assert_eq!(lines[1499], "line 1999");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_accepts_a_very_large_line_count() {
+        let dir = test_dir("tail-max");
+        let log = dir.join("output.log");
+
+        // A line count larger than usize on a 32-bit target must clamp to
+        // "every line" rather than truncating through the cast.
+        fs::write(&log, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(
+            tail_lines(&log, u64::MAX).unwrap(),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
 
         fs::remove_dir_all(dir).unwrap();
     }
