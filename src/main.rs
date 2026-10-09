@@ -409,8 +409,8 @@ fn run_rm(cli: &RmCli) -> Result<i32, String> {
 fn remove_in(root: &Path, cli: &RmCli) -> Result<i32, String> {
     let name = &cli.session_name;
     let dir = root.join(name);
-    // The directory (and its empty output.log) is created before tmux starts,
-    // so the directory is the reliable existence check.
+    // The directory is created before tmux starts, so it is the reliable
+    // existence check; `output.log` is created once tmux has started.
     if !dir.is_dir() {
         eprintln!("error: no state for {name}");
         return Ok(3);
@@ -527,7 +527,30 @@ fn launch_task(paths: &RuntimePaths, script: &[u8]) -> Result<(), String> {
         ));
     }
 
+    if let Err(err) = ensure_log(&paths.log_path) {
+        // Without a log the directory is invisible to list and clean; stop the
+        // session we just started rather than leaving both behind.
+        let _ = kill_session(&paths.session_name);
+        return Err(format!(
+            "failed to create {}: {err}",
+            paths.log_path.display()
+        ));
+    }
+
     Ok(())
+}
+
+/// Create `path` if missing without truncating it, so output the shell already
+/// wrote is kept. Called once tmux has started so the log exists even if the
+/// shell never opened its redirect; `list` and `clean` discover a task by its
+/// `output.log`.
+fn ensure_log(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map(|_| ())
 }
 
 /// Best-effort removal of a failed start's state directory. The task never ran,
@@ -953,11 +976,9 @@ fn build_runtime_paths(task_name: &str) -> io::Result<RuntimePaths> {
     build_runtime_paths_in(&state_root(), task_name)
 }
 
-/// Create the session directory under `root` together with an empty
-/// `output.log`. The log must exist before tmux starts: `list` and `clean`
-/// discover a task by its `output.log`, so a session whose shell never opens
-/// the redirect would otherwise leave a directory no subcommand can see or
-/// remove.
+/// Create the session directory under `root` and return the paths into it.
+/// `output.log` is created later, once tmux has started, so a starting task has
+/// no log yet and `list` and `clean` cannot mistake it for a finished one.
 fn build_runtime_paths_in(root: &Path, task_name: &str) -> io::Result<RuntimePaths> {
     let unique = unique_suffix();
     let normalized = normalize_task_name(task_name);
@@ -965,20 +986,11 @@ fn build_runtime_paths_in(root: &Path, task_name: &str) -> io::Result<RuntimePat
     let dir = root.join(&session_name);
     fs::create_dir_all(&dir)?;
 
-    let paths = RuntimePaths {
+    Ok(RuntimePaths {
         session_name,
         script_path: dir.join("run.sh"),
         log_path: dir.join("output.log"),
-    };
-
-    if let Err(err) = fs::write(&paths.log_path, b"") {
-        // Without the log the directory is invisible to list and clean; leave
-        // nothing behind rather than a directory no subcommand can reach.
-        let _ = fs::remove_dir_all(&dir);
-        return Err(err);
-    }
-
-    Ok(paths)
+    })
 }
 
 /// Where task state lives: `XDG_STATE_HOME`, then `~/.local/state`, then the
@@ -2100,15 +2112,32 @@ mod tests {
     }
 
     #[test]
-    fn build_runtime_paths_creates_an_empty_log() {
+    fn build_runtime_paths_defers_the_log_until_tmux_starts() {
         let root = test_dir("paths");
         let paths = build_runtime_paths_in(&root, "build").unwrap();
 
-        assert!(paths.log_path.is_file());
-        assert!(fs::read(&paths.log_path).unwrap().is_empty());
+        let session_dir = paths.script_path.parent().unwrap();
+        assert!(session_dir.is_dir());
+        assert!(!paths.log_path.exists());
         assert!(!paths.script_path.exists());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_log_creates_without_truncating() {
+        let dir = test_dir("ensure-log");
+        let log = dir.join("output.log");
+
+        ensure_log(&log).unwrap();
+        assert!(log.is_file());
+        assert!(fs::read(&log).unwrap().is_empty());
+
+        fs::write(&log, "already written").unwrap();
+        ensure_log(&log).unwrap();
+        assert_eq!(fs::read(&log).unwrap(), "already written".as_bytes());
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
