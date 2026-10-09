@@ -409,8 +409,8 @@ fn run_rm(cli: &RmCli) -> Result<i32, String> {
 fn remove_in(root: &Path, cli: &RmCli) -> Result<i32, String> {
     let name = &cli.session_name;
     let dir = root.join(name);
-    // The directory is created before tmux starts, so it is the reliable
-    // existence check; `output.log` appears only once tmux opens the redirect.
+    // The directory (and its empty output.log) is created before tmux starts,
+    // so the directory is the reliable existence check.
     if !dir.is_dir() {
         eprintln!("error: no state for {name}");
         return Ok(3);
@@ -530,9 +530,9 @@ fn launch_task(paths: &RuntimePaths, script: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Best-effort removal of a failed start's state directory. It holds no
-/// `output.log`, so `list` and `clean` cannot see it: leaving it behind would
-/// accumulate state no subcommand ever reports or removes.
+/// Best-effort removal of a failed start's state directory. The task never ran,
+/// so no subcommand should report it: leaving it behind would accumulate state
+/// for a task that does not exist.
 fn remove_state_dir(paths: &RuntimePaths) {
     if let Some(dir) = paths.script_path.parent() {
         let _ = fs::remove_dir_all(dir);
@@ -950,17 +950,35 @@ fn is_valid_session_name(name: &str) -> bool {
 }
 
 fn build_runtime_paths(task_name: &str) -> io::Result<RuntimePaths> {
+    build_runtime_paths_in(&state_root(), task_name)
+}
+
+/// Create the session directory under `root` together with an empty
+/// `output.log`. The log must exist before tmux starts: `list` and `clean`
+/// discover a task by its `output.log`, so a session whose shell never opens
+/// the redirect would otherwise leave a directory no subcommand can see or
+/// remove.
+fn build_runtime_paths_in(root: &Path, task_name: &str) -> io::Result<RuntimePaths> {
     let unique = unique_suffix();
     let normalized = normalize_task_name(task_name);
     let session_name = format!("{normalized}_{unique}");
-    let dir = state_root().join(&session_name);
+    let dir = root.join(&session_name);
     fs::create_dir_all(&dir)?;
 
-    Ok(RuntimePaths {
+    let paths = RuntimePaths {
         session_name,
         script_path: dir.join("run.sh"),
         log_path: dir.join("output.log"),
-    })
+    };
+
+    if let Err(err) = fs::write(&paths.log_path, b"") {
+        // Without the log the directory is invisible to list and clean; leave
+        // nothing behind rather than a directory no subcommand can reach.
+        let _ = fs::remove_dir_all(&dir);
+        return Err(err);
+    }
+
+    Ok(paths)
 }
 
 /// Where task state lives: `XDG_STATE_HOME`, then `~/.local/state`, then the
@@ -2094,6 +2112,18 @@ mod tests {
             state_root_from(Some(OsString::new()), Some(OsString::from("/home/u"))),
             PathBuf::from("/home/u/.local/state/tmux-run")
         );
+    }
+
+    #[test]
+    fn build_runtime_paths_creates_an_empty_log() {
+        let root = test_dir("paths");
+        let paths = build_runtime_paths_in(&root, "build").unwrap();
+
+        assert!(paths.log_path.is_file());
+        assert!(fs::read(&paths.log_path).unwrap().is_empty());
+        assert!(!paths.script_path.exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
