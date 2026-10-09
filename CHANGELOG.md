@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/mhalder/tmux-run/compare/v0.3.0...v0.3.1) - 2026-10-09
+
+### Fixed
+
+- state cleanup, marker robustness, and log tail window ([#12](https://github.com/mhalder/tmux-run/pull/12))
+
 ## [0.3.0](https://github.com/mhalder/tmux-run/compare/v0.2.0...v0.3.0) - 2026-10-07
 
 ### Added
