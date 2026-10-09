@@ -88,7 +88,7 @@ tmux-run rm <session-name>
 
 `rm` refuses a running task; pass `--force` to kill its tmux session and remove its state in one step. To sweep every finished task's state, run `tmux-run clean` (add `--dry-run` first to see what it would remove).
 
-Do not leave idle shells, completed sessions, or `tail -f` panes running.
+Before you report a task finished, delete the stale sessions and state directories your own runs left behind: `tmux-run rm <session-name>` for each one you started, or `tmux-run clean` to sweep every finished task at once. Do not leave idle shells, completed sessions, or `tail -f` panes running.
 
 ## Inside Herdr
 
