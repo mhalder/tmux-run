@@ -410,7 +410,7 @@ fn remove_in(root: &Path, cli: &RmCli) -> Result<i32, String> {
     let name = &cli.session_name;
     let dir = root.join(name);
     // The directory is created before tmux starts, so it is the reliable
-    // existence check; `output.log` appears only once tmux opens the redirect.
+    // existence check; `output.log` is created once tmux has started.
     if !dir.is_dir() {
         eprintln!("error: no state for {name}");
         return Ok(3);
@@ -473,7 +473,28 @@ fn start_task(cli: &Cli) -> Result<(), String> {
         .map_err(|err| format!("failed to prepare paths: {err}"))?;
     let script = render_script(&cli.command);
 
-    fs::write(&paths.script_path, &script)
+    if let Err(err) = launch_task(&paths, &script) {
+        remove_state_dir(&paths);
+        return Err(err);
+    }
+
+    println!("session: {}", paths.session_name);
+    println!("log: {}", paths.log_path.display());
+    println!("wait: tmux-run wait {}", shell_quote(&paths.session_name));
+    println!("completion marker: {DONE_MARKER_PREFIX}<status>");
+    println!(
+        "attach: tmux attach -t {}",
+        shell_quote(&paths.session_name)
+    );
+    println!("follow log: tail -f {}", shell_quote_path(&paths.log_path));
+
+    Ok(())
+}
+
+/// Write the script and start the tmux session. Splitting this from
+/// `start_task` lets a failure unwind the state directory the caller created.
+fn launch_task(paths: &RuntimePaths, script: &[u8]) -> Result<(), String> {
+    fs::write(&paths.script_path, script)
         .map_err(|err| format!("failed to write {}: {err}", paths.script_path.display()))?;
 
     let mut runner = Vec::new();
@@ -506,17 +527,39 @@ fn start_task(cli: &Cli) -> Result<(), String> {
         ));
     }
 
-    println!("session: {}", paths.session_name);
-    println!("log: {}", paths.log_path.display());
-    println!("wait: tmux-run wait {}", shell_quote(&paths.session_name));
-    println!("completion marker: {DONE_MARKER_PREFIX}<status>");
-    println!(
-        "attach: tmux attach -t {}",
-        shell_quote(&paths.session_name)
-    );
-    println!("follow log: tail -f {}", shell_quote_path(&paths.log_path));
+    if let Err(err) = ensure_log(&paths.log_path) {
+        // Without a log the directory is invisible to list and clean; stop the
+        // session we just started rather than leaving both behind.
+        let _ = kill_session(&paths.session_name);
+        return Err(format!(
+            "failed to create {}: {err}",
+            paths.log_path.display()
+        ));
+    }
 
     Ok(())
+}
+
+/// Create `path` if missing without truncating it, so output the shell already
+/// wrote is kept. Called once tmux has started so the log exists even if the
+/// shell never opened its redirect; `list` and `clean` discover a task by its
+/// `output.log`.
+fn ensure_log(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map(|_| ())
+}
+
+/// Best-effort removal of a failed start's state directory. The task never ran,
+/// so no subcommand should report it: leaving it behind would accumulate state
+/// for a task that does not exist.
+fn remove_state_dir(paths: &RuntimePaths) {
+    if let Some(dir) = paths.script_path.parent() {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, String> {
@@ -930,10 +973,17 @@ fn is_valid_session_name(name: &str) -> bool {
 }
 
 fn build_runtime_paths(task_name: &str) -> io::Result<RuntimePaths> {
+    build_runtime_paths_in(&state_root(), task_name)
+}
+
+/// Create the session directory under `root` and return the paths into it.
+/// `output.log` is created later, once tmux has started, so a starting task has
+/// no log yet and `list` and `clean` cannot mistake it for a finished one.
+fn build_runtime_paths_in(root: &Path, task_name: &str) -> io::Result<RuntimePaths> {
     let unique = unique_suffix();
     let normalized = normalize_task_name(task_name);
     let session_name = format!("{normalized}_{unique}");
-    let dir = state_root().join(&session_name);
+    let dir = root.join(&session_name);
     fs::create_dir_all(&dir)?;
 
     Ok(RuntimePaths {
@@ -1042,8 +1092,12 @@ fn session_exists(session_name: &str) -> bool {
 /// the marker is appended last and the log can be large. The marker is accepted
 /// either at the start of the last complete line (`__DONE__:0`), or concatenated
 /// onto the end of it when the command's output had no trailing newline
-/// (`no trailing newline__DONE__:0`). A trailing partial line is ignored so a
-/// torn read is a retry rather than a wrong status.
+/// (`no trailing newline__DONE__:0`). A complete line that starts with the
+/// reserved prefix but whose remainder is not a `u8` status is the command's
+/// own output, or a late writer that inherited the log fd; it is skipped so an
+/// earlier real marker is still found, and it never fails the wrapper. A
+/// trailing partial line is ignored so a torn read is a retry rather than a
+/// wrong status.
 fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     let mut file = match fs::File::open(log_path) {
         Ok(file) => file,
@@ -1078,14 +1132,9 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     // of output that did not end with a newline.
     if let Some(last_line) = text.lines().next_back() {
         let line = last_line.trim_end_matches('\r');
-        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                return Ok(None);
-            }
-            let status = rest
-                .parse::<u8>()
-                .map_err(|_| format!("malformed completion marker: {last_line}"))?;
+        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX)
+            && let Ok(status) = rest.trim().parse::<u8>()
+        {
             return Ok(Some(status));
         }
         if let Some(at) = line.rfind(DONE_MARKER_PREFIX) {
@@ -1099,14 +1148,9 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     }
 
     for line in text.lines().rev() {
-        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX) {
-            let rest = rest.trim();
-            if rest.is_empty() {
-                return Ok(None);
-            }
-            let status = rest
-                .parse::<u8>()
-                .map_err(|_| format!("malformed completion marker: {line}"))?;
+        if let Some(rest) = line.strip_prefix(DONE_MARKER_PREFIX)
+            && let Ok(status) = rest.trim().parse::<u8>()
+        {
             return Ok(Some(status));
         }
     }
@@ -1127,11 +1171,13 @@ fn session_state(log_path: &Path, alive: impl FnOnce() -> bool) -> Result<Sessio
     }
 }
 
-/// The last `max_lines` lines of `log_path`, reading at most `LOG_TAIL_BYTES`
-/// from the end of the file. A trailing partial line (no final newline) is kept
-/// as a line for display, unlike marker detection which ignores it. When the
-/// read starts mid-line because the log exceeds `LOG_TAIL_BYTES`, that leading
-/// fragment is dropped so only complete lines are shown.
+/// The last `max_lines` lines of `log_path`. The read window starts at
+/// `LOG_TAIL_BYTES` and grows until it holds `max_lines` complete lines or the
+/// whole file, so `--lines N` is not silently capped by the window. A trailing
+/// partial line (no final newline) is kept as a line for display, unlike marker
+/// detection which ignores it. When the window starts mid-line because the log
+/// exceeds the window, that leading fragment is dropped so only complete lines
+/// are shown.
 fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
     let mut file = fs::File::open(log_path)
         .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
@@ -1140,37 +1186,52 @@ fn tail_lines(log_path: &Path, max_lines: u64) -> Result<Vec<String>, String> {
         .metadata()
         .map_err(|err| format!("failed to stat {}: {err}", log_path.display()))?
         .len();
-    let mut truncated = false;
-    if len > LOG_TAIL_BYTES {
-        file.seek(SeekFrom::Start(len - LOG_TAIL_BYTES))
+
+    // `usize` is narrower than `u64` on 32-bit targets; clamp before the cast
+    // so a huge `--lines` value means "every line" instead of wrapping.
+    let max_lines = usize::try_from(max_lines).unwrap_or(usize::MAX);
+
+    let mut window = LOG_TAIL_BYTES.min(len);
+    loop {
+        file.seek(SeekFrom::Start(len - window))
             .map_err(|err| format!("failed to seek {}: {err}", log_path.display()))?;
-        truncated = true;
-    }
 
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail)
-        .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail)
+            .map_err(|err| format!("failed to read {}: {err}", log_path.display()))?;
 
-    let text = String::from_utf8_lossy(&tail);
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
+        let text = String::from_utf8_lossy(&tail);
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
 
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    // The read started mid-line, so the first element is a fragment of a
-    // line cut by the seek; drop it so only complete lines are shown.
-    if truncated && !lines.is_empty() {
-        lines.remove(0);
-    }
+        let mut lines: Vec<&str> = text.split('\n').collect();
+        if text.ends_with('\n') {
+            lines.pop();
+        }
+        // The window started mid-line, so the first element is a fragment of a
+        // line cut by the seek; drop it so only complete lines are shown.
+        if window < len && !lines.is_empty() {
+            lines.remove(0);
+        }
+        // A trailing partial line is kept for display but is not a complete
+        // line, so it does not count toward the window being big enough.
+        let complete_lines = if text.ends_with('\n') {
+            lines.len()
+        } else {
+            lines.len().saturating_sub(1)
+        };
 
-    let start = lines.len().saturating_sub(max_lines as usize);
-    Ok(lines[start..]
-        .iter()
-        .map(|line| (*line).to_string())
-        .collect())
+        if window == len || complete_lines >= max_lines {
+            let start = lines.len().saturating_sub(max_lines);
+            return Ok(lines[start..]
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect());
+        }
+
+        window = window.saturating_mul(2).min(len);
+    }
 }
 
 fn unique_suffix() -> String {
@@ -2055,6 +2116,35 @@ mod tests {
     }
 
     #[test]
+    fn build_runtime_paths_defers_the_log_until_tmux_starts() {
+        let root = test_dir("paths");
+        let paths = build_runtime_paths_in(&root, "build").unwrap();
+
+        let session_dir = paths.script_path.parent().unwrap();
+        assert!(session_dir.is_dir());
+        assert!(!paths.log_path.exists());
+        assert!(!paths.script_path.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_log_creates_without_truncating() {
+        let dir = test_dir("ensure-log");
+        let log = dir.join("output.log");
+
+        ensure_log(&log).unwrap();
+        assert!(log.is_file());
+        assert!(fs::read(&log).unwrap().is_empty());
+
+        fs::write(&log, "already written").unwrap();
+        ensure_log(&log).unwrap();
+        assert_eq!(fs::read(&log).unwrap(), "already written".as_bytes());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn reads_done_marker_from_log_tail() {
         let dir = test_dir("marker");
         let log = dir.join("output.log");
@@ -2074,7 +2164,38 @@ mod tests {
         fs::write(&log, "__DONE__:1").unwrap();
         assert_eq!(read_done_marker(&log).unwrap(), None);
         fs::write(&log, "__DONE__:oops\n").unwrap();
-        assert!(read_done_marker(&log).is_err());
+        assert_eq!(read_done_marker(&log).unwrap(), None);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_prefix_in_command_output_is_not_a_marker() {
+        let dir = test_dir("marker-prefix");
+        let log = dir.join("output.log");
+
+        // A command's own output can contain the reserved prefix; a line whose
+        // remainder is not a u8 status is output, not a completion marker.
+        fs::write(&log, "__DONE__:oops\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), None);
+        fs::write(&log, "note __DONE__:x\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), None);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn late_output_does_not_hide_an_earlier_marker() {
+        let dir = test_dir("marker-late");
+        let log = dir.join("output.log");
+
+        // A daemonized child that inherited the log fd can write a
+        // reserved-prefix line after the real marker; it must not hide the
+        // marker written earlier.
+        fs::write(&log, "done\n__DONE__:0\n__DONE__:oops\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(0));
+        fs::write(&log, "done\n__DONE__:7\n__DONE__:\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), Some(7));
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2323,7 +2444,7 @@ mod tests {
         );
 
         fs::write(&log, "__DONE__:oops\n").unwrap();
-        assert!(session_state(&log, || false).is_err());
+        assert_eq!(session_state(&log, || false).unwrap(), SessionState::Ended);
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2386,6 +2507,43 @@ mod tests {
                 "expected a complete line, not a seek fragment: {returned:?}"
             );
         }
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_reads_beyond_the_tail_window() {
+        let dir = test_dir("tail-large");
+        let log = dir.join("output.log");
+
+        // 2000 lines are more than LOG_TAIL_BYTES (8 KiB), so reading the
+        // whole requested 1500 lines needs a window larger than one read.
+        let mut contents = String::new();
+        for n in 0..2000 {
+            contents.push_str(&format!("line {n}\n"));
+        }
+        fs::write(&log, &contents).unwrap();
+
+        let lines = tail_lines(&log, 1500).unwrap();
+        assert_eq!(lines.len(), 1500);
+        assert_eq!(lines[0], "line 500");
+        assert_eq!(lines[1499], "line 1999");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tail_lines_accepts_a_very_large_line_count() {
+        let dir = test_dir("tail-max");
+        let log = dir.join("output.log");
+
+        // A line count larger than usize on a 32-bit target must clamp to
+        // "every line" rather than truncating through the cast.
+        fs::write(&log, "one\ntwo\nthree\n").unwrap();
+        assert_eq!(
+            tail_lines(&log, u64::MAX).unwrap(),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
 
         fs::remove_dir_all(dir).unwrap();
     }

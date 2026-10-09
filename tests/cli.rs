@@ -449,6 +449,40 @@ fn clean_and_rm_remove_finished_task_state() {
 }
 
 #[test]
+fn failed_start_leaves_no_state_behind() {
+    let Some(state_dir) = prepare_state_dir() else {
+        return;
+    };
+    let empty_bin = state_dir.join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).expect("failed to create empty bin dir");
+    let bin = env!("CARGO_BIN_EXE_tmux-run");
+
+    // A PATH without tmux makes `tmux new-session` fail after the state
+    // directory is created but before any log exists, the window in which a
+    // failed start used to leave state that list and clean could never reach.
+    let start = Command::new(bin)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("PATH", &empty_bin)
+        .args(["failed-start", "--", "bash", "-c", "exit 0"])
+        .output()
+        .expect("failed to run tmux-run");
+
+    assert!(
+        !start.status.success(),
+        "start should fail without tmux on PATH: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    let leftover = dir_contents(&state_dir.join("tmux-run"));
+    assert!(
+        !leftover.contains("failed-start"),
+        "a failed start must not leave unreachable state: {leftover}"
+    );
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+#[test]
 fn unique_suffix_is_unique_across_threads() {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
