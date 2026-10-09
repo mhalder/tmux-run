@@ -1062,8 +1062,11 @@ fn session_exists(session_name: &str) -> bool {
 /// the marker is appended last and the log can be large. The marker is accepted
 /// either at the start of the last complete line (`__DONE__:0`), or concatenated
 /// onto the end of it when the command's output had no trailing newline
-/// (`no trailing newline__DONE__:0`). A trailing partial line is ignored so a
-/// torn read is a retry rather than a wrong status.
+/// (`no trailing newline__DONE__:0`). A complete line that starts with the
+/// reserved prefix but whose remainder is not a `u8` status is the command's
+/// own output, not a marker: it reads as no marker rather than an error. A
+/// trailing partial line is ignored so a torn read is a retry rather than a
+/// wrong status.
 fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
     let mut file = match fs::File::open(log_path) {
         Ok(file) => file,
@@ -1103,9 +1106,12 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
             if rest.is_empty() {
                 return Ok(None);
             }
-            let status = rest
-                .parse::<u8>()
-                .map_err(|_| format!("malformed completion marker: {last_line}"))?;
+            // A complete line starting with the reserved prefix but without a
+            // numeric status is the command's own output, not a marker; treat
+            // it as no marker rather than failing the wrapper.
+            let Ok(status) = rest.parse::<u8>() else {
+                return Ok(None);
+            };
             return Ok(Some(status));
         }
         if let Some(at) = line.rfind(DONE_MARKER_PREFIX) {
@@ -1124,9 +1130,12 @@ fn read_done_marker(log_path: &Path) -> Result<Option<u8>, String> {
             if rest.is_empty() {
                 return Ok(None);
             }
-            let status = rest
-                .parse::<u8>()
-                .map_err(|_| format!("malformed completion marker: {line}"))?;
+            // As above: a reserved-prefix line without a numeric status is the
+            // command's own output. Do not scan earlier lines past it — a real
+            // marker would have been appended after this output.
+            let Ok(status) = rest.parse::<u8>() else {
+                return Ok(None);
+            };
             return Ok(Some(status));
         }
     }
@@ -2094,7 +2103,22 @@ mod tests {
         fs::write(&log, "__DONE__:1").unwrap();
         assert_eq!(read_done_marker(&log).unwrap(), None);
         fs::write(&log, "__DONE__:oops\n").unwrap();
-        assert!(read_done_marker(&log).is_err());
+        assert_eq!(read_done_marker(&log).unwrap(), None);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserved_prefix_in_command_output_is_not_a_marker() {
+        let dir = test_dir("marker-prefix");
+        let log = dir.join("output.log");
+
+        // A command's own output can contain the reserved prefix; a line whose
+        // remainder is not a u8 status is output, not a completion marker.
+        fs::write(&log, "__DONE__:oops\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), None);
+        fs::write(&log, "note __DONE__:x\n").unwrap();
+        assert_eq!(read_done_marker(&log).unwrap(), None);
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2343,7 +2367,7 @@ mod tests {
         );
 
         fs::write(&log, "__DONE__:oops\n").unwrap();
-        assert!(session_state(&log, || false).is_err());
+        assert_eq!(session_state(&log, || false).unwrap(), SessionState::Ended);
 
         fs::remove_dir_all(dir).unwrap();
     }
