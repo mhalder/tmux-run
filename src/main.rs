@@ -473,7 +473,28 @@ fn start_task(cli: &Cli) -> Result<(), String> {
         .map_err(|err| format!("failed to prepare paths: {err}"))?;
     let script = render_script(&cli.command);
 
-    fs::write(&paths.script_path, &script)
+    if let Err(err) = launch_task(&paths, &script) {
+        remove_state_dir(&paths);
+        return Err(err);
+    }
+
+    println!("session: {}", paths.session_name);
+    println!("log: {}", paths.log_path.display());
+    println!("wait: tmux-run wait {}", shell_quote(&paths.session_name));
+    println!("completion marker: {DONE_MARKER_PREFIX}<status>");
+    println!(
+        "attach: tmux attach -t {}",
+        shell_quote(&paths.session_name)
+    );
+    println!("follow log: tail -f {}", shell_quote_path(&paths.log_path));
+
+    Ok(())
+}
+
+/// Write the script and start the tmux session. Splitting this from
+/// `start_task` lets a failure unwind the state directory the caller created.
+fn launch_task(paths: &RuntimePaths, script: &[u8]) -> Result<(), String> {
+    fs::write(&paths.script_path, script)
         .map_err(|err| format!("failed to write {}: {err}", paths.script_path.display()))?;
 
     let mut runner = Vec::new();
@@ -506,17 +527,16 @@ fn start_task(cli: &Cli) -> Result<(), String> {
         ));
     }
 
-    println!("session: {}", paths.session_name);
-    println!("log: {}", paths.log_path.display());
-    println!("wait: tmux-run wait {}", shell_quote(&paths.session_name));
-    println!("completion marker: {DONE_MARKER_PREFIX}<status>");
-    println!(
-        "attach: tmux attach -t {}",
-        shell_quote(&paths.session_name)
-    );
-    println!("follow log: tail -f {}", shell_quote_path(&paths.log_path));
-
     Ok(())
+}
+
+/// Best-effort removal of a failed start's state directory. It holds no
+/// `output.log`, so `list` and `clean` cannot see it: leaving it behind would
+/// accumulate state no subcommand ever reports or removes.
+fn remove_state_dir(paths: &RuntimePaths) {
+    if let Some(dir) = paths.script_path.parent() {
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, String> {
