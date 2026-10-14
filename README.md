@@ -129,7 +129,7 @@ The task name is normalized for tmux (every character outside ASCII letters, dig
 
 ## Agent skill
 
-The skill text is embedded in the binary, so `tmux-run skill --install` writes it wherever a coding agent looks for skills and `tmux-run skill --check` verifies it. The canonical source in this repository is [`skills/tmux-run/SKILL.md`](skills/tmux-run/SKILL.md).
+The skill text is embedded in the binary, so `tmux-run skill --install` writes it and `tmux-run skill --check` verifies it. The canonical source in this repository is [`skills/tmux-run/SKILL.md`](skills/tmux-run/SKILL.md).
 
 ```sh
 tmux-run skill --check
@@ -142,6 +142,14 @@ The default directory is `~/.agents/skills/tmux-run`. `--install` creates the di
 tmux-run skill --install /path/to/agent/skills/tmux-run
 tmux-run skill --check /path/to/agent/skills/tmux-run
 ```
+
+Claude Code reads `~/.claude/skills` rather than `~/.agents/skills`, so give it the skill with the [skills CLI](https://github.com/vercel-labs/skills):
+
+```sh
+skills add mhalder/tmux-run -g -a pi -a claude-code -y
+```
+
+Pi takes the canonical file at `~/.agents/skills/tmux-run` and Claude Code a symlink to it. Run `tmux-run skill --install` after it, and `tmux-run skill --check` whenever the installed file and this binary may disagree: the repository's copy tracks its default branch, which can carry a skill newer than the release.
 
 ## Shell completion
 
