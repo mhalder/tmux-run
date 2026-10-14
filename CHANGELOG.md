@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/mhalder/tmux-run/compare/v0.3.1...v0.4.0) - 2026-10-14
+
+### Changed
+
+- [**breaking**] drop the skill verb and the embedded skill ([#14](https://github.com/mhalder/tmux-run/pull/14))
+
 ## [0.3.1](https://github.com/mhalder/tmux-run/compare/v0.3.0...v0.3.1) - 2026-10-09
 
 ### Fixed
