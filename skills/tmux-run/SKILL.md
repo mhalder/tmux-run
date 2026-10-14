@@ -105,14 +105,6 @@ Use tmux-run instead when the result must outlive the session as a file. A Herdr
 
 ## Updating
 
-The skill text is embedded in the binary. To refresh this file from the installed `tmux-run`, run:
-
-```sh
-tmux-run skill --check <this skill directory>
-```
-
-and, if it reports missing or stale, run:
-
-```sh
-tmux-run skill --install <this skill directory>
-```
+This skill is one file in the tool's repository. The skills CLI installs it
+(`skills add mhalder/tmux-run -g -a pi -a claude-code -y`) and `skills update`
+refreshes it from the repository's default branch.

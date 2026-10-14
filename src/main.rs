@@ -14,7 +14,6 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SESSION_CHECK_EVERY: u32 = 4;
 
-const SKILL: &str = include_str!("../skills/tmux-run/SKILL.md");
 const COMPLETION_BASH: &str = include_str!("../completions/tmux-run.bash");
 const COMPLETION_ZSH: &str = include_str!("../completions/_tmux-run");
 const COMPLETION_FISH: &str = include_str!("../completions/tmux-run.fish");
@@ -25,7 +24,6 @@ const HELP: &str = "Usage: tmux-run <task-name> -- <command> [args...]
        tmux-run show <session-name> [--lines <n>] [--json]
        tmux-run clean [--older-than <seconds>] [--dry-run]
        tmux-run rm <session-name> [--force]
-       tmux-run skill [--install [DIR]] [--check [DIR]]
        tmux-run completion <bash|zsh|fish> [--install] [--check]
        tmux-run --help | -h
        tmux-run --version | -V
@@ -61,11 +59,6 @@ Rm subcommand:
   tmux-run rm <session-name>            Remove one task's state (refuses a running task)
   tmux-run rm <session-name> --force    Kill the task's tmux session, then remove its state
 
-Skill subcommand:
-  tmux-run skill                    Print the embedded agent skill to stdout
-  tmux-run skill --install [DIR]    Write DIR/SKILL.md (default ~/.agents/skills/tmux-run)
-  tmux-run skill --check [DIR]      Exit 1 if DIR/SKILL.md is missing or differs
-
 Completion subcommand:
   tmux-run completion <shell>              Print the completion script for <shell>
   tmux-run completion <shell> --install    Install the completion script
@@ -91,7 +84,6 @@ Examples:
   tmux-run clean --older-than 86400
   tmux-run rm build_1234-5678 --force
   tmux-run deploy -- bash -lc 'echo start; ./deploy.sh'
-  tmux-run skill --install
   tmux-run completion bash --install
 ";
 
@@ -105,7 +97,6 @@ enum CliAction {
     Show(ShowCli),
     Clean(CleanCli),
     Rm(RmCli),
-    Skill(SkillCli),
     Completion(CompletionCli),
     CompleteSessions(Option<OsString>),
 }
@@ -180,19 +171,6 @@ impl SessionState {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct SkillCli {
-    mode: SkillMode,
-    dir: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SkillMode {
-    Print,
-    Install,
-    Check,
-}
-
-#[derive(Debug, PartialEq, Eq)]
 struct CompletionCli {
     shell: Shell,
     mode: CompletionMode,
@@ -264,7 +242,6 @@ fn run() -> Result<i32, String> {
         CliAction::Show(show) => run_show(&show),
         CliAction::Clean(clean) => run_clean(&clean),
         CliAction::Rm(rm) => run_rm(&rm),
-        CliAction::Skill(skill) => run_skill(&skill),
         CliAction::Completion(completion) => run_completion(&completion),
         CliAction::CompleteSessions(prefix) => {
             for name in list_sessions(prefix.as_deref()) {
@@ -591,9 +568,6 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
     if first == "rm" {
         return parse_rm_subcommand(args);
     }
-    if first == "skill" {
-        return parse_skill(args);
-    }
     if first == "completion" {
         return parse_completion(args);
     }
@@ -858,47 +832,6 @@ fn parse_rm(
     Ok(CliAction::Rm(RmCli {
         session_name,
         force,
-    }))
-}
-
-fn parse_skill(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
-    let mut mode: Option<SkillMode> = None;
-    let mut dir: Option<PathBuf> = None;
-
-    while let Some(arg) = args.next() {
-        let arg = arg
-            .into_string()
-            .map_err(|_| "arguments must be valid UTF-8".to_string())?;
-
-        let wanted = match arg.as_str() {
-            // `wait` already treats a leading `--help`/`-h` as the help request;
-            // accept it here too rather than failing with a usage error.
-            "--help" | "-h" => return Ok(CliAction::Help),
-            "--install" => SkillMode::Install,
-            "--check" => SkillMode::Check,
-            other => return Err(format!("unexpected argument for skill: {other}")),
-        };
-
-        if mode.is_some() {
-            return Err("--install and --check are mutually exclusive".to_string());
-        }
-        mode = Some(wanted);
-
-        // An optional directory may follow; a leading `-` means no directory.
-        if let Some(next) = args.next() {
-            let next = next
-                .into_string()
-                .map_err(|_| "arguments must be valid UTF-8".to_string())?;
-            if next.starts_with('-') {
-                return Err(format!("unexpected argument for skill: {next}"));
-            }
-            dir = Some(PathBuf::from(next));
-        }
-    }
-
-    Ok(CliAction::Skill(SkillCli {
-        mode: mode.unwrap_or(SkillMode::Print),
-        dir,
     }))
 }
 
@@ -1343,43 +1276,6 @@ fn json_status(status: Option<u8>) -> String {
     }
 }
 
-fn run_skill(cli: &SkillCli) -> Result<i32, String> {
-    match cli.mode {
-        SkillMode::Print => {
-            print!("{SKILL}");
-            Ok(0)
-        }
-        SkillMode::Install => {
-            let dir = resolve_skill_dir(cli.dir.as_deref())?;
-            let path = dir.join("SKILL.md");
-            install_bytes(&path, SKILL.as_bytes())
-        }
-        SkillMode::Check => {
-            let dir = resolve_skill_dir(cli.dir.as_deref())?;
-            let path = dir.join("SKILL.md");
-            let hint = format!("tmux-run skill --install {}", dir.display());
-            check_file(&path, SKILL.as_bytes(), &hint)
-        }
-    }
-}
-
-fn resolve_skill_dir(explicit: Option<&Path>) -> Result<PathBuf, String> {
-    resolve_skill_dir_from(explicit, env::var_os("HOME"))
-}
-
-fn resolve_skill_dir_from(
-    explicit: Option<&Path>,
-    home: Option<OsString>,
-) -> Result<PathBuf, String> {
-    if let Some(dir) = explicit {
-        return Ok(dir.to_path_buf());
-    }
-    let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
-        "HOME is not set; pass a directory with --install <DIR> or --check <DIR>".to_string()
-    })?;
-    Ok(PathBuf::from(home).join(".agents/skills/tmux-run"))
-}
-
 fn run_completion(cli: &CompletionCli) -> Result<i32, String> {
     let contents = completion_script(cli.shell);
     match cli.mode {
@@ -1760,48 +1656,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_skill_subcommand() {
-        assert_eq!(
-            parse_args(["skill"].into_iter().map(OsString::from)).unwrap(),
-            CliAction::Skill(SkillCli {
-                mode: SkillMode::Print,
-                dir: None
-            })
-        );
-        assert_eq!(
-            parse_args(["skill", "--install"].into_iter().map(OsString::from)).unwrap(),
-            CliAction::Skill(SkillCli {
-                mode: SkillMode::Install,
-                dir: None
-            })
-        );
-        assert_eq!(
-            parse_args(
-                ["skill", "--install", "/tmp/s"]
-                    .into_iter()
-                    .map(OsString::from)
-            )
-            .unwrap(),
-            CliAction::Skill(SkillCli {
-                mode: SkillMode::Install,
-                dir: Some(PathBuf::from("/tmp/s"))
-            })
-        );
-        assert_eq!(
-            parse_args(
-                ["skill", "--check", "/tmp/s"]
-                    .into_iter()
-                    .map(OsString::from)
-            )
-            .unwrap(),
-            CliAction::Skill(SkillCli {
-                mode: SkillMode::Check,
-                dir: Some(PathBuf::from("/tmp/s"))
-            })
-        );
-    }
-
-    #[test]
     fn parses_completion_subcommand() {
         assert_eq!(
             parse_args(["completion", "bash"].into_iter().map(OsString::from)).unwrap(),
@@ -1842,15 +1696,7 @@ mod tests {
         assert!(parse_args(["completion", "nope"].into_iter().map(OsString::from)).is_err());
         assert!(
             parse_args(
-                ["skill", "--install", "--check"]
-                    .into_iter()
-                    .map(OsString::from)
-            )
-            .is_err()
-        );
-        assert!(
-            parse_args(
-                ["skill", "--install", "--help"]
+                ["completion", "bash", "--install", "--check"]
                     .into_iter()
                     .map(OsString::from)
             )
@@ -1881,8 +1727,6 @@ mod tests {
         for args in [
             vec!["wait", "--help"],
             vec!["wait", "-h"],
-            vec!["skill", "--help"],
-            vec!["skill", "-h"],
             vec!["completion", "--help"],
             vec!["completion", "-h"],
         ] {
@@ -1893,19 +1737,6 @@ mod tests {
                 "expected help for {label}"
             );
         }
-    }
-
-    #[test]
-    fn skill_dir_requires_home_without_explicit_dir() {
-        assert_eq!(
-            resolve_skill_dir_from(None, Some(OsString::from("/home/u"))).unwrap(),
-            PathBuf::from("/home/u/.agents/skills/tmux-run")
-        );
-        assert!(resolve_skill_dir_from(None, None).is_err());
-        assert_eq!(
-            resolve_skill_dir_from(Some(Path::new("/custom")), None).unwrap(),
-            PathBuf::from("/custom")
-        );
     }
 
     #[test]
@@ -1939,35 +1770,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_install_then_check_cycle() {
-        let dir = test_dir("skill");
-        let install = SkillCli {
-            mode: SkillMode::Install,
-            dir: Some(dir.clone()),
-        };
-        let check = SkillCli {
-            mode: SkillMode::Check,
-            dir: Some(dir.clone()),
-        };
-        let path = dir.join("SKILL.md");
-
-        assert_eq!(run_skill(&install).unwrap(), 0);
-        assert_eq!(fs::read(&path).unwrap(), SKILL.as_bytes());
-
-        assert_eq!(run_skill(&check).unwrap(), 0);
-
-        let mut edited = SKILL.as_bytes().to_vec();
-        edited[0] ^= 0xff;
-        fs::write(&path, &edited).unwrap();
-        assert_eq!(run_skill(&check).unwrap(), 1);
-
-        fs::remove_file(&path).unwrap();
-        assert_eq!(run_skill(&check).unwrap(), 1);
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn completion_install_then_check_cycle() {
         let dir = test_dir("completion");
         let path = dir.join("tmux-run.bash");
@@ -1998,8 +1800,10 @@ mod tests {
     }
 
     #[test]
-    fn embedded_skill_declares_matching_name() {
-        let frontmatter = SKILL
+    fn skill_declares_matching_name() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/tmux-run/SKILL.md");
+        let skill = fs::read_to_string(path).expect("read the skill");
+        let frontmatter = skill
             .split("---")
             .nth(1)
             .expect("skill must have YAML frontmatter");
@@ -2025,7 +1829,6 @@ mod tests {
                 "wait",
                 "clean",
                 "rm",
-                "skill",
                 "completion",
                 "__complete",
                 "--help",
