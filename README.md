@@ -39,7 +39,6 @@ tmux-run list [--json]
 tmux-run show <session-name> [--lines N] [--json]
 tmux-run clean [--older-than <seconds>] [--dry-run]
 tmux-run rm <session-name> [--force]
-tmux-run skill [--install [DIR]] [--check [DIR]]
 tmux-run completion <bash|zsh|fish> [--install] [--check]
 tmux-run --help | -h
 tmux-run --version | -V
@@ -129,19 +128,13 @@ The task name is normalized for tmux (every character outside ASCII letters, dig
 
 ## Agent skill
 
-The skill text is embedded in the binary, so `tmux-run skill --install` writes it wherever a coding agent looks for skills and `tmux-run skill --check` verifies it. The canonical source in this repository is [`skills/tmux-run/SKILL.md`](skills/tmux-run/SKILL.md).
+The skill is [`skills/tmux-run/SKILL.md`](skills/tmux-run/SKILL.md) in this repository, installed with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```sh
-tmux-run skill --check
-tmux-run skill --install
+skills add mhalder/tmux-run -g -a pi -a claude-code -y
 ```
 
-The default directory is `~/.agents/skills/tmux-run`. `--install` creates the directory and writes `SKILL.md`, reporting whether it was created, updated, or already up to date. `--check` byte-compares the file against the embedded copy and exits `1` when it is missing or stale. To point the skill at another agent's skills directory, pass the directory explicitly:
-
-```sh
-tmux-run skill --install /path/to/agent/skills/tmux-run
-tmux-run skill --check /path/to/agent/skills/tmux-run
-```
+That writes the canonical file at `~/.agents/skills/tmux-run`, the directory Pi reads, and makes `~/.claude/skills/tmux-run` a symlink to it. `skills update` refreshes it from the repository's default branch.
 
 ## Shell completion
 
